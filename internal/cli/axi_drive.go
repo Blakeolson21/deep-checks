@@ -407,10 +407,12 @@ func rerunParams(repoID, branch string, skipSteps []types.StepName, intent strin
 // at the first gate so the caller can surface it for a human/agent decision.
 //
 // Auto-resolution means "agree to fix every finding": a gate with actionable
-// findings is fixed (every finding selected), and the resulting fix_review is
-// accepted; gates with only non-actionable findings are approved. Each step is
-// fixed at most once so a finding the fix cannot clear converges to an approval
-// instead of looping forever.
+// findings is fixed (every finding selected) and re-evaluated after each fix
+// round; gates whose findings are clean or all non-actionable are approved.
+// Each step is funded at most maxYesFixRoundsPerStep fix rounds; a step still
+// reporting actionable findings after that is handed back as a decision point
+// (the run stays parked awaiting-agent) rather than approved, so a run can
+// never complete as "passed" carrying findings nothing applied or adjudicated.
 //
 // The CI step monitors an open PR until a human merges or closes it (a live
 // status the TUI shows), so it never reaches a terminal state on its own. An
@@ -427,7 +429,7 @@ func driveRun(ctx context.Context, progress io.Writer, client *ipc.Client, socke
 
 func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc.Client, reconciler *runReconciler, runID string, autoApprove bool, readCILog func(string) []string) (run *ipc.RunInfo, ciReady bool, err error) {
 	pp := &progressPrinter{w: progress, seen: map[string]string{}}
-	fixedSteps := map[string]bool{}
+	fixedSteps := map[string]int{}
 	pendingGate := ""
 	for {
 		run, err := reconciler.Next(ctx)
@@ -447,16 +449,31 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 			if !autoApprove {
 				return run, false, nil
 			}
-			gateKey := gate.Name + "\x00" + gate.Status
+			// The fix-round count is part of the key because a fast fix round
+			// re-parks the step at the same status: that re-park is a new gate
+			// that must still be answered, so status alone cannot identify a
+			// gate we have already responded to.
+			gateKey := fmt.Sprintf("%s\x00%s\x00%d", gate.Name, gate.Status, gate.FixRoundCount)
 			if pendingGate == gateKey {
 				// Duplicate or delayed events can race persistence after a response.
 				// Keep waiting for an authoritative transition rather than answering
 				// the same gate twice.
 				continue
 			}
-			action, findingIDs := gateResolution(gate, fixedSteps[gate.Name])
+			// Budget from persisted rounds or this loop's own count, whichever
+			// is higher, so a reattaching drive loop cannot reset the budget
+			// and re-fund fix rounds forever.
+			used := gate.FixRoundCount
+			if fixedSteps[gate.Name] > used {
+				used = fixedSteps[gate.Name]
+			}
+			action, findingIDs, resolved := gateResolution(gate, used)
+			if !resolved {
+				fmt.Fprintf(progress, "%s gate still has actionable findings after %d fix round(s); leaving the run parked for explicit adjudication\n", gate.Name, used)
+				return run, false, nil
+			}
 			if action == types.ActionFix {
-				fixedSteps[gate.Name] = true
+				fixedSteps[gate.Name] = used + 1
 			}
 			if err := sendRespond(client, runID, types.StepName(gate.Name), action, findingIDs, nil, nil); err != nil {
 				return nil, false, fmt.Errorf("auto-resolve %s: %w", gate.Name, err)
@@ -499,20 +516,36 @@ func ciLogReader(p *paths.Paths) func(string) []string {
 	}
 }
 
-// gateResolution decides how --yes answers an approval gate. A gate with
-// actionable findings (anything other than purely informational "no-op") is
-// fixed with every finding selected, unless this step was already fixed once -
-// in which case the gate is approved so the run converges instead of looping on
-// a finding the fix cannot clear. Gates with only non-actionable findings, no
-// findings, or actionable findings that carry no IDs (which a fix would resolve
-// to zero selections) are approved.
-func gateResolution(gate stepView, alreadyFixed bool) (types.ApprovalAction, []string) {
-	if alreadyFixed || gate.Status == string(types.StepStatusFixReview) {
-		return types.ActionApprove, nil
-	}
+// maxYesFixRoundsPerStep bounds how many fix rounds --yes funds for a single
+// step before it stops auto-resolving that step's gate. One round is often not
+// enough (a legitimate fix can surface new, legitimate findings on re-review),
+// but a step still reporting actionable findings after this many funded rounds
+// is not converging, and approving it anyway would complete the run as
+// "passed" carrying findings nothing applied or adjudicated - the silent-pass
+// integrity bug this bound exists to prevent.
+const maxYesFixRoundsPerStep = 3
+
+// gateResolution decides how --yes answers an approval gate, given how many
+// fix rounds the step has already consumed (persisted rounds or the drive
+// loop's own count, whichever is higher, so a reattach cannot reset the
+// budget).
+//
+// A gate whose findings are absent, unparseable, or all non-actionable
+// ("no-op") is approved - including a fix_review whose fix cleared everything.
+// A gate with actionable findings is fixed with every finding selected while
+// fix rounds remain. Once the budget is exhausted, or the actionable findings
+// carry no IDs (a fix would resolve to zero selections), the gate is NOT
+// auto-resolved: resolved=false hands it back to the caller as an explicit
+// decision point, leaving the run parked awaiting-agent so the unresolved
+// findings are adjudicated deliberately instead of silently approved into a
+// passing outcome.
+func gateResolution(gate stepView, fixRoundsUsed int) (action types.ApprovalAction, findingIDs []string, resolved bool) {
 	parsed, err := types.ParseFindingsJSON(gate.FindingsJSON)
 	if err != nil || !types.HasActionableFindings(parsed) {
-		return types.ActionApprove, nil
+		return types.ActionApprove, nil, true
+	}
+	if fixRoundsUsed >= maxYesFixRoundsPerStep {
+		return "", nil, false
 	}
 	ids := make([]string, 0, len(parsed.Items))
 	for _, f := range parsed.Items {
@@ -521,16 +554,24 @@ func gateResolution(gate stepView, alreadyFixed bool) (types.ApprovalAction, []s
 		}
 	}
 	if len(ids) == 0 {
-		return types.ActionApprove, nil
+		return "", nil, false
 	}
-	return types.ActionFix, ids
+	return types.ActionFix, ids, true
 }
 
-// waitStepLeavesGate blocks until the named step's status changes away from the
-// gate status we just answered, or the run terminates. This prevents a
-// double-approve race: respond is asynchronous, so without waiting the next
-// event reconciliation could still observe the same gate and approve it twice.
-func waitStepLeavesGate(ctx context.Context, socketPath, runID, step, gateStatus string) error {
+// waitStepLeavesGate blocks until the named step moves past the gate we just
+// answered, or the run terminates. This prevents a double-approve race:
+// respond is asynchronous, so without waiting the next event reconciliation
+// could still observe the same gate and approve it twice.
+//
+// A status change alone is not a sufficient progress signal: a fix round
+// starts and finishes between two reconciliations when the fix agent is fast,
+// and the step re-parks with the same fix_review status it had before, so
+// waiting on status inequality alone never returns. The persisted fix-round
+// count only ever grows and is written when a round completes, so a count
+// above the gate's snapshot (gateFixRounds) proves the answered gate was
+// consumed even when the status round-tripped unobserved.
+func waitStepLeavesGate(ctx context.Context, socketPath, runID, step, gateStatus string, gateFixRounds int) error {
 	reconciler := newRunReconciler(&ipcRunStateSource{socketPath: socketPath}, runID)
 	defer reconciler.Close()
 	for {
@@ -543,7 +584,7 @@ func waitStepLeavesGate(ctx context.Context, socketPath, runID, step, gateStatus
 		}
 		for _, s := range run.Steps {
 			if string(s.StepName) == step {
-				if string(s.Status) != gateStatus {
+				if string(s.Status) != gateStatus || s.FixRoundCount > gateFixRounds {
 					return nil
 				}
 				break
@@ -803,7 +844,7 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 
 	// Let the executor consume the response before we re-read state, so we
 	// don't immediately observe the same gate we just answered.
-	if err := waitStepLeavesGate(ctx, env.p.Socket(), runID, string(stepName), gateStatusFor(rv, string(stepName))); err != nil {
+	if err := waitStepLeavesGate(ctx, env.p.Socket(), runID, string(stepName), gateStatusFor(rv, string(stepName)), gateFixRoundsFor(rv, string(stepName))); err != nil {
 		return emitError(cmd, 1, fmt.Sprintf("wait for %s: %v", stepName, err))
 	}
 
@@ -824,6 +865,17 @@ func gateStatusFor(rv runView, step string) string {
 		}
 	}
 	return string(types.StepStatusAwaitingApproval)
+}
+
+// gateFixRoundsFor returns the fix-round count of step in rv, the baseline the
+// post-respond wait uses to recognize a completed fix round as progress.
+func gateFixRoundsFor(rv runView, step string) int {
+	for _, s := range rv.Steps {
+		if s.Name == step {
+			return s.FixRoundCount
+		}
+	}
+	return 0
 }
 
 func newAxiAbortCmd() *cobra.Command {
