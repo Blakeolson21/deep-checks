@@ -295,8 +295,16 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
 	// Restore the run's own skip set. A recovered run whose executor forgets it
 	// would reach push, pr and ci for the first time during recovery and publish
-	// work the operator asked to keep local. Runs that predate the recorded skip
-	// set report no plan, so recovery keeps the old behaviour for them.
+	// work the operator asked to keep local.
+	//
+	// A run started before the skip set was recorded carries no plan. Recovery
+	// keeps the old behaviour for those (every remaining step runs), but says so
+	// rather than resuming silently, because that is the case where a restart
+	// can still publish a branch its operator meant to keep local.
+	if plan.run.SkippedSteps == nil {
+		slog.Warn("recovered run predates the recorded skip set; every remaining step will run, including push, pr and ci",
+			"run_id", plan.run.ID, "branch", plan.run.Branch)
+	}
 	executor.SetSkippedSteps(plan.skipSteps)
 	done := make(chan struct{})
 	m.mu.Lock()

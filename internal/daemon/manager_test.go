@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -542,5 +543,86 @@ func TestPushReceivedDemoModeBypassesAgentResolution(t *testing.T) {
 	}
 	if step.execCnt.Load() == 0 {
 		t.Error("mock step was never executed")
+	}
+}
+
+// A plan the daemon cannot read must be refused, not resumed as though it
+// skipped nothing. A lenient decoder that dropped the unreadable name would
+// resume with an empty skip set and execute push, pr and ci, which is exactly
+// the failure the recorded plan exists to prevent. Refusing costs an operator a
+// manual restart; guessing publishes work that was meant to stay local.
+func TestPrepareRecoveredRunRefusesAnUnreadableSkipSet(t *testing.T) {
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{&mockApprovalStep{name: types.StepReview}, &mockPassStep{name: types.StepPush}}
+	})
+	repo, headSHA := setupTestGitRepo(t, p, d, "corrupt-skip-plan")
+
+	run, err := d.InsertRun(repo.ID, "main", headSHA, headSHA, []types.StepName{types.StepPush})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "psuh" is the discriminating case: a lenient decoder would yield a skip
+	// set that matches no step, so push would run. Only a refusal is safe.
+	raw, err := sql.Open("sqlite", p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec("UPDATE runs SET skipped_steps = ? WHERE id = ?", "psuh", run.ID); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	worktree := p.WorktreeDir(repo.ID, run.ID)
+	if err := git.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), worktree, headSHA); err != nil {
+		t.Fatal(err)
+	}
+	step, err := d.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertStepResult(run.ID, types.StepPush); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.StartStep(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"needs approval","action":"ask-user"}],"summary":"needs approval"}`
+	if err := d.SetStepFindings(step.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertStepRound(step.ID, 1, "initial", &findings, nil, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateStepStatusWithDuration(step.ID, types.StepStatusAwaitingApproval, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetRunAwaitingAgent(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewRunManager(d, p, func() []pipeline.Step {
+		return []pipeline.Step{&mockApprovalStep{name: types.StepReview}, &mockPassStep{name: types.StepPush}}
+	})
+	plan, err := mgr.prepareRecoveredRun(context.Background(), stored)
+	if err == nil {
+		if plan != nil && plan.agent != nil {
+			_ = plan.agent.Close()
+		}
+		t.Fatal("prepareRecoveredRun accepted an unreadable skip set; it must refuse rather than resume with no skips")
+	}
+	if plan != nil {
+		t.Fatalf("prepareRecoveredRun returned a plan alongside its error: %#v", plan)
+	}
+	if !strings.Contains(err.Error(), "psuh") {
+		t.Errorf("error = %v, want it to name the unreadable step", err)
 	}
 }

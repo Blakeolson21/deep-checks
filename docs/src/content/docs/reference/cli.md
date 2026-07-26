@@ -160,7 +160,8 @@ When the resolved run is parked at an `awaiting_approval` or `fix_review` gate, 
 The field disappears after `axi respond`, on cancel, and on terminal outcomes; use it to distinguish a run waiting for the driving agent from one actively running, fixing, or watching CI.
 
 The run object also reports `skipped_steps`, the steps this run will never execute, or `none` when it skips nothing.
-Read it to know in advance whether finishing the run pushes the branch and opens a PR, or ends on this machine: a step the run will skip still reads `pending` in the `steps` table until the run reaches it, so per-step status cannot answer that.
+Read it to know in advance whether the run can reach `push`, `pr` and `ci` at all, or is confined to this machine whatever you answer at a gate.
+A step the run will skip stays `pending` in the `steps` table until the run reaches it, so per-step status cannot answer that.
 Runs created before the pipeline recorded the skip set omit the field, which means unknown rather than nothing skipped.
 The recorded set also survives a daemon restart, so a resumed run skips exactly what it was started with.
 When the resolved run has a `running` or `fixing` step, the run object includes `active_steps`.

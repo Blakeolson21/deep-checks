@@ -2399,7 +2399,7 @@ func assertRootDefaultsToHistory(t *testing.T, h *Harness) {
 		"feature/recent",
 	}
 	for i, branch := range branches {
-		run, err := database.InsertRun(h.repoID(), branch, "hist"+itoa(i), "000000")
+		run, err := database.InsertRun(h.repoID(), branch, "hist"+itoa(i), "000000", nil)
 		if err != nil {
 			t.Fatalf("insert root history run: %v", err)
 		}
@@ -2440,7 +2440,7 @@ func assertStatusShortHeadSHA(t *testing.T, h *Harness) {
 		t.Fatalf("open e2e db for short head status: %v", err)
 	}
 	defer database.Close()
-	run, err := database.InsertRun(h.repoID(), "feature/short-sha", "abc123", "0000000000000000")
+	run, err := database.InsertRun(h.repoID(), "feature/short-sha", "abc123", "0000000000000000", nil)
 	if err != nil {
 		t.Fatalf("insert short head run: %v", err)
 	}
