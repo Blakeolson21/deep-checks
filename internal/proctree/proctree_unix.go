@@ -76,13 +76,19 @@ func killProcess(pid int, sig syscall.Signal) error {
 	return syscall.Kill(pid, sig)
 }
 
-// KillGroup SIGKILLs a whole process group. It complements Kill: the pid set
-// from a snapshot is only as fresh as the snapshot, whereas a group kill also
+// killGroup SIGKILLs a whole process group. It complements Kill: the pid set
+// from a sample is only as fresh as that sample, whereas a group kill also
 // reaches processes spawned since then by a still-living member of that group.
+//
+// It is deliberately unexported. A group kill has the widest blast radius of
+// anything here, and it is only safe once the group leader's identity has been
+// re-verified, so the sole way to reach it is through KillGroups, which performs
+// that check. Leaving an unguarded version exported would be a footgun that a
+// future call site could reach for without knowing the rule.
 //
 // ESRCH ("no such group") is the expected, benign outcome when the group already
 // drained, so no error is reported.
-func KillGroup(pgid int) {
+func killGroup(pgid int) {
 	if pgid <= 1 || pgid == os.Getpid() {
 		return
 	}

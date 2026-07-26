@@ -212,3 +212,62 @@ func swapRecordReapForTest(snap []Proc, times map[int]time.Time, kill func(int, 
 		snapshotFunc = prevSnap
 	}
 }
+
+// TestKillGroups_SkipsGroupWhoseLeaderPIDWasRecycled is the group-kill analogue
+// of the per-pid recycle guard, and the stakes are higher: a stale pgid does not
+// signal one wrong process, it signals every member of whatever group that pid
+// now leads.
+func TestKillGroups_SkipsGroupWhoseLeaderPIDWasRecycled(t *testing.T) {
+	recorded := time.Date(2026, time.July, 21, 17, 9, 0, 0, time.UTC)
+	sampled := []Proc{{PID: 4243, PPID: 1, PGID: 4243, Started: recorded}}
+
+	var signalled []int
+	defer swapForTest(
+		func([]int) (map[int]time.Time, error) {
+			return map[int]time.Time{4243: recorded.Add(time.Hour)}, nil
+		},
+		func(pid int, sig syscall.Signal) error { signalled = append(signalled, pid); return nil },
+	)()
+
+	KillGroups([]int{4243}, sampled)
+
+	if len(signalled) != 0 {
+		t.Fatalf("KillGroups signalled %v for a recycled group leader, want none", signalled)
+	}
+}
+
+func TestKillGroups_KillsGroupWhoseLeaderStillMatches(t *testing.T) {
+	started := time.Date(2026, time.July, 21, 17, 9, 0, 0, time.UTC)
+	sampled := []Proc{{PID: 4243, PPID: 1, PGID: 4243, Started: started}}
+
+	var signalled []int
+	defer swapForTest(
+		func([]int) (map[int]time.Time, error) { return map[int]time.Time{4243: started}, nil },
+		func(pid int, sig syscall.Signal) error { signalled = append(signalled, pid); return nil },
+	)()
+
+	KillGroups([]int{4243}, sampled)
+
+	if len(signalled) != 1 || signalled[0] != -4243 {
+		t.Fatalf("KillGroups signalled %v, want [-4243] (negative pid targets the group)", signalled)
+	}
+}
+
+// TestKillGroups_SkipsUnrecordedGroupLeader fails closed: with no sampled start
+// time for the group leader there is nothing to verify against, and an
+// unverifiable group kill is exactly what this guard exists to prevent.
+func TestKillGroups_SkipsUnrecordedGroupLeader(t *testing.T) {
+	started := time.Date(2026, time.July, 21, 17, 9, 0, 0, time.UTC)
+
+	var signalled []int
+	defer swapForTest(
+		func([]int) (map[int]time.Time, error) { return map[int]time.Time{4243: started}, nil },
+		func(pid int, sig syscall.Signal) error { signalled = append(signalled, pid); return nil },
+	)()
+
+	KillGroups([]int{4243}, nil) // no sampled descendants at all
+
+	if len(signalled) != 0 {
+		t.Fatalf("KillGroups signalled %v with no recorded leader, want none", signalled)
+	}
+}

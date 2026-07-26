@@ -90,6 +90,12 @@ func reapProcessTree(pid int) error {
 	// Kill each distinct group the descendants occupy. A setsid() escapee leads
 	// its own group, so this also reaches children it spawned since the last
 	// sample, which no pid list can cover.
+	//
+	// The groups go through KillGroups rather than a bare KillGroup so each
+	// leader's start time is re-verified first. The window here is smaller than
+	// for a persisted record but it is not small: a step can run for well over an
+	// hour (the motivating incident's ran 86 minutes), which is ample time for a
+	// sampled group leader's pid to be recycled onto something unrelated.
 	groups := make(map[int]bool, len(descendants))
 	for _, pgid := range trackedGroups {
 		groups[pgid] = true
@@ -99,9 +105,11 @@ func reapProcessTree(pid int) error {
 			groups[p.PGID] = true
 		}
 	}
+	pgids := make([]int, 0, len(groups))
 	for pgid := range groups {
-		proctree.KillGroup(pgid)
+		pgids = append(pgids, pgid)
 	}
+	proctree.KillGroups(pgids, descendants)
 	proctree.Kill(descendants)
 	return err
 }
