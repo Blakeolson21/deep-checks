@@ -192,6 +192,12 @@ func runWithOptionsLocked(p *paths.Paths, d *db.DB, stepFactory StepFactory, sta
 	agent.SetServerPIDsDir(p.ServerPIDsDir())
 	defer agent.SetServerPIDsDir("")
 
+	// Same idea one level down: every command we spawn from here on records the
+	// descendants it accumulates, so if this daemon dies abruptly - which is
+	// exactly what the OOM killer does when leaked worker pools exhaust the
+	// host - the next one can still find and reap them.
+	defer shellenv.SetProcessRecordDir(p.ProcTreesDir())()
+
 	mgr := NewRunManager(d, p, stepFactory)
 
 	// Publish process identity as soon as the singleton lock is held. Startup
@@ -354,6 +360,7 @@ func writeDaemonPIDFile(path string, record daemonPIDFile) error {
 func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager) {
 	orphanStarted := time.Now()
 	reapOrphanedServers(p)
+	reapOrphanedProcessTrees(p)
 	logStartupPhase("orphan_servers", orphanStarted)
 
 	gateStarted := time.Now()

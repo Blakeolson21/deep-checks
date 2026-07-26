@@ -90,6 +90,13 @@ func (p *Paths) CLILog() string { return filepath.Join(p.root, "logs", "cli.log"
 // behind by a crashed predecessor.
 func (p *Paths) ServerPIDsDir() string { return filepath.Join(p.root, "servers") }
 
+// ProcTreesDir holds one record per live command leader so a freshly started
+// daemon can reap process trees a crashed predecessor left running.
+//
+// This is the step/agent-subprocess counterpart to ServerPIDsDir, which only
+// covers long-lived managed servers that write a PID file of their own.
+func (p *Paths) ProcTreesDir() string { return filepath.Join(p.root, "proctrees") }
+
 // EnsureDirs creates all required directories under root.
 func (p *Paths) EnsureDirs() error {
 	dirs := []string{
@@ -98,6 +105,7 @@ func (p *Paths) EnsureDirs() error {
 		p.WorktreesDir(),
 		p.LogsDir(),
 		p.ServerPIDsDir(),
+		p.ProcTreesDir(),
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o755); err != nil {

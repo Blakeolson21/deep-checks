@@ -72,6 +72,18 @@ signal a pid can be recycled, and killing a recycled pid is exactly the failure 
 this change exists to avoid. It hard-refuses pid <= 1, the current pid, and the current
 process's ancestors.
 
+That re-read is a targeted `ps -p <pids>`, not a full listing. During implementation a
+full `ps -A` on the reap path regressed
+`TestDefaultShellCommandOutput_TimesOut` from milliseconds to 592ms, because the reap
+runs on every command teardown including short git subprocesses, and a listing of the
+~1000 processes on the box costs tens of milliseconds (hundreds under `-race`). Paying
+that per command would have been a self-inflicted version of the slowdown this change
+exists to fix. With nothing to kill - the overwhelmingly common case - `Kill` now costs
+nothing at all.
+
+The protected-pid set needs a full listing to walk ancestry, so it is computed once per
+process and cached rather than per reap.
+
 ### Why a snapshot alone is insufficient
 
 There are two reap paths and they differ in a way that matters:
@@ -84,6 +96,12 @@ There are two reap paths and they differ in a way that matters:
 
 The motivating incident exited 0, so it took the second path. Periodic descendant
 tracking is therefore the primary mechanism, not a supplement.
+
+This is why the reap path ends up running no process listing of its own at all: the
+poller owns snapshots, and a listing taken at reap time is both expensive and, on the
+path that matters, useless. The consequence is that a leader cancelled before its first
+sample has an empty union, which is why the first sample is taken after 1s rather than
+after a full tick.
 
 ### Tracker
 
@@ -111,9 +129,14 @@ incident's `xctest` processes lived about 16 minutes, so they would be sampled r
 ### Persistence and startup recovery
 
 The tracker writes `<NM_HOME>/proctrees/<leader>.json` holding the leader pid and start
-time, the worktree path, the run id, and the descendant set. `shellenv` exposes
+time, the descendant set, and the observed groups. `shellenv` exposes
 `SetProcessRecordDir(dir)`, called once by the daemon. Unset is a no-op, so the CLI and
 tests do not touch disk.
+
+The record carries process identity only. It does not carry the worktree path or run id
+that the original sketch called for: `shellenv` has no access to run context, and
+nothing in this branch needs them. Branch 3's worktree-removal guard does, and will add
+them at a layer that knows.
 
 `recoverOnStartup` sweeps that directory alongside the existing `reapOrphanedServers`,
 reusing the start-time-match guard and the `otherDaemonAlive` skip so a second daemon
@@ -125,8 +148,20 @@ The failing-first test: a leader spawns a child that calls `syscall.Setsid()` an
 outlives it. The child's pgid is its own pid, so `syscall.Kill(-leader, SIGKILL)`
 cannot reach it. This fails against current `main` and passes after the fix.
 
-A second test covers the tracker path, where the intermediate parent exits before
-termination so only the polled union can catch the survivor.
+A second test covers the tracker path: the leader exits 0 first, so the escapee is
+already reparented and unreachable from a post-mortem snapshot. Ablating the tracked
+union was verified to make it fail, confirming the union rather than the walk is what
+carries that case.
+
+Both tests wait for the poller to have actually sampled the escapee before asserting.
+Whether a sample landed before the reap is the difference between the guarantee under
+test and the documented residual gap, and under `-race` a `ps` over a thousand
+processes is slow enough to lose that race by accident.
+
+`TestCombinedOutputShellCommand_WaitDelayBoundsEscapedPipeHolder` pins sampling off, so
+the escaped pipe holder survives the reap. That keeps the test proving what it was
+written to prove - that WaitDelay alone bounds `Wait` - which matters because the reaper
+is best-effort and WaitDelay is the backstop when it fails.
 
 `internal/agent/reap_unix_test.go` is rewritten rather than extended, because its
 current "escaped" case asserts the opposite of the desired behavior.
