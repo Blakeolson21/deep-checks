@@ -21,6 +21,7 @@ When set, everything else moves under this root:
 - Database: `$NM_HOME/state.sqlite`
 - Socket / PID / singleton lock: `$NM_HOME/socket`, `$NM_HOME/daemon.pid`, and `$NM_HOME/daemon.lock`
 - Managed agent server PID records: `$NM_HOME/servers/`
+- Process-tree recovery records: `$NM_HOME/proctrees/`
 - Managed service names get a short stable suffix derived from `$NM_HOME` so multiple installs don't collide.
 
 ## `NM_DAEMON_CONNECT_TIMEOUT`
