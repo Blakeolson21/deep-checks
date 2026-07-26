@@ -115,9 +115,11 @@ func takeTrackedLeader(pid int) ([]proctree.Proc, []int) {
 	}
 	trackerMu.Unlock()
 
-	// Wait for a sample already in flight to finish before dropping the record.
-	// Otherwise that sample could write the record back after RemoveRecord ran,
-	// resurrecting a stale pid list for the next daemon to act on.
+	// Join the retiring poller so no sampler goroutine outlives the last
+	// tracked leader. A record cannot be resurrected after RemoveRecord in any
+	// case - a sample that no longer finds the leader in trackedByPID writes
+	// nothing - so this is goroutine hygiene and deterministic teardown, not a
+	// correctness guard.
 	if stopping != nil {
 		<-stopping.done
 	}
@@ -183,6 +185,11 @@ func trackerInterval(first bool) time.Duration {
 }
 
 func sampleDescendantsOnce() {
+	// Signal once per round on every exit path, including rounds that find
+	// nothing. Firing only when descendants turn up would leave a waiter with no
+	// way to learn that a round completed empty.
+	defer notifySampled()
+
 	trackerMu.Lock()
 	leaders := make([]int, 0, len(trackedByPID))
 	for pid := range trackedByPID {
@@ -218,7 +225,6 @@ func sampleDescendantsOnce() {
 		}
 		rec, dir := snapshotRecordLocked(entry, ok)
 		trackerMu.Unlock()
-		notifySampled()
 
 		if dir != "" {
 			_ = proctree.WriteRecord(dir, rec)
