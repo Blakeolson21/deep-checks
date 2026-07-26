@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"syscall"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/proctree"
 )
 
 // defaultWaitDelay is the pipe backstop installed on cmd.WaitDelay, mirroring
@@ -20,10 +22,17 @@ import (
 const defaultWaitDelay = 5 * time.Second
 
 // ConfigureShellCommand isolates cmd in its own process group (Setpgid) and
-// installs a cmd.Cancel that SIGKILLs the whole group when cmd's context is
-// cancelled. exec.CommandContext otherwise only kills the direct child PID,
+// installs a cmd.Cancel that reaps the resulting process tree when cmd's context
+// is cancelled. exec.CommandContext otherwise only kills the direct child PID,
 // leaving grandchildren (a test runner's worker processes, an agent-spawned
 // git/build/editor) running and holding the worktree locked.
+//
+// A process group is not a process tree, and the difference is not academic. A
+// descendant that calls setsid() gets its own session and its own group, so
+// kill(-leaderPID) provably cannot reach it - and setsid() is what Node's
+// `detached: true` does, which is how Claude Code's CLI Bash tool spawns its
+// shell. Reaching those descendants needs the ppid walk in internal/proctree,
+// which reapProcessTree performs alongside the group kill.
 //
 // Cancellation is only half the lifecycle: cmd.Cancel never fires when the
 // command exits on its own (success or failure). Use RunShellCommand,
@@ -47,7 +56,7 @@ func ConfigureShellCommand(cmd *exec.Cmd) {
 		if cmd.Process == nil {
 			return os.ErrProcessDone
 		}
-		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		err := reapProcessTree(cmd.Process.Pid)
 		if errors.Is(err, syscall.ESRCH) {
 			return os.ErrProcessDone
 		}
@@ -55,11 +64,60 @@ func ConfigureShellCommand(cmd *exec.Cmd) {
 	}
 }
 
+// reapProcessTree kills the process group led by pid and every descendant that
+// has left it, returning the error from signalling the group.
+//
+// Order matters. The snapshot is taken BEFORE the leader is signalled: the
+// instant the leader dies the kernel rewrites its children's ppid to 1 and
+// reparents them to launchd or init, which erases the only trail back to this
+// command. A walk performed afterwards has nothing to follow.
+//
+// The group kill still runs first among the signals because it is one syscall
+// that handles the common case. The tree walk is what catches a descendant that
+// called setsid() and left the group, which is the case the group kill provably
+// cannot reach.
+// This path deliberately runs no process listing of its own. Snapshots are the
+// poller's job (tracker_unix.go), because a listing here would cost tens of
+// milliseconds on every command teardown - including every short git subprocess
+// - and would be too late to help anyway once the leader has exited. When
+// nothing escaped, which is the overwhelmingly common case, this is a single
+// syscall.
+func reapProcessTree(pid int) error {
+	descendants, trackedGroups := takeTrackedLeader(pid)
+
+	err := syscall.Kill(-pid, syscall.SIGKILL)
+
+	// Kill each distinct group the descendants occupy. A setsid() escapee leads
+	// its own group, so this also reaches children it spawned since the last
+	// sample, which no pid list can cover.
+	groups := make(map[int]bool, len(descendants))
+	for _, pgid := range trackedGroups {
+		groups[pgid] = true
+	}
+	for _, p := range descendants {
+		if p.PGID != pid {
+			groups[p.PGID] = true
+		}
+	}
+	for pgid := range groups {
+		proctree.KillGroup(pgid)
+	}
+	proctree.Kill(descendants)
+	return err
+}
+
 // StartShellCommand starts cmd after ConfigureShellCommand has prepared its
 // process-group lifecycle. Unix needs no extra setup beyond cmd.Start, but the
 // wrapper keeps call sites aligned with Windows job-object setup.
 func StartShellCommand(cmd *exec.Cmd) error {
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// Registering here rather than at each call site is deliberate: there are
+	// many call sites, and one that forgot to register would silently
+	// reintroduce the leak with no visible symptom until a host ran out of CPU.
+	trackLeader(cmd.Process.Pid, time.Now())
+	return nil
 }
 
 // TerminateShellCommandGroup SIGKILLs the whole process group led by a command
@@ -81,11 +139,15 @@ func StartShellCommand(cmd *exec.Cmd) error {
 // It is safe to call unconditionally after Wait: the group persists only while
 // a member is alive, so when the leader exited cleanly with no survivors the
 // kill is a harmless no-op (ESRCH). A nil or never-started command is a no-op.
+//
+// By the time this runs the leader is already dead, so a live snapshot can no
+// longer link anything back to it - the kernel has rewritten its children's ppid
+// to 1. What makes this path work is the descendant union the poller accumulated
+// while the leader was still alive; see tracker_unix.go. Calling it twice is
+// harmless: the union is consumed on the first call.
 func TerminateShellCommandGroup(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
-	// Negative PID targets the whole group (Setpgid made the leader's PID the
-	// group ID). errors.Is(ESRCH) is the expected, benign "no survivors" case.
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	_ = reapProcessTree(cmd.Process.Pid)
 }

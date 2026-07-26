@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/proctree"
 )
 
 // TestTerminateShellCommandGroup_ReapsGrandchildAfterCleanExit pins the
@@ -48,6 +50,170 @@ func TestTerminateShellCommandGroup_ReapsGrandchildAfterCleanExit(t *testing.T) 
 	}
 }
 
+// TestConfigureShellCommand_CancelReapsSetsidEscapedChild pins the guarantee the
+// process-group kill cannot provide on its own.
+//
+// Setpgid isolates the leader in its own process group, and both cmd.Cancel and
+// TerminateShellCommandGroup reap with kill(-leaderPID). That signal reaches only
+// processes whose pgid still equals the leader pid. A child that calls setsid()
+// gets its own session and its own process group, so it is unreachable by the
+// group kill - and setsid() is exactly what Node's `detached: true` does, which is
+// how Claude Code's CLI Bash tool spawns its shell.
+//
+// This is the leak behind gate run 01KY36EAXX53WZSEC4ZYSMY4F0: six xctest
+// processes spawned under an agent invocation were still alive three days later
+// at ~50% CPU each with PPID=1. Reaping requires walking the process tree, not
+// signalling a single group.
+func TestConfigureShellCommand_CancelReapsSetsidEscapedChild(t *testing.T) {
+	defer setTrackerTickForTest(25 * time.Millisecond)()
+	pidFile := filepath.Join(t.TempDir(), "escaped.pid")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSetsidEscapeHelper$")
+	cmd.Env = append(os.Environ(),
+		"NM_SHELLENV_SETSID_HELPER=leader",
+		"NM_SHELLENV_SETSID_PID="+pidFile,
+	)
+	ConfigureShellCommand(cmd)
+	if err := StartShellCommand(cmd); err != nil {
+		t.Fatalf("StartShellCommand: %v", err)
+	}
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- cmd.Wait() }()
+
+	// The escapee writes its pid only after setsid() returns, so a readable pid
+	// means it has already left the leader's process group.
+	escaped := readPID(t, pidFile, 10*time.Second)
+	t.Cleanup(func() { _ = syscall.Kill(escaped, syscall.SIGKILL) })
+
+	pgid, err := syscall.Getpgid(escaped)
+	if err != nil {
+		t.Fatalf("precondition: read escapee pgid: %v", err)
+	}
+	if pgid == cmd.Process.Pid {
+		t.Fatalf("precondition failed: escapee %d is still in the leader's group %d, "+
+			"so this test would not exercise the escape", escaped, cmd.Process.Pid)
+	}
+
+	waitForSampledDescendant(t, cmd.Process.Pid, escaped, 15*time.Second)
+
+	cancel()
+	<-waitErr
+
+	if !pidGoneWithin(escaped, 10*time.Second) {
+		t.Fatalf("setsid escapee %d survived cancellation of leader %d (escapee pgid %d): "+
+			"kill(-%d) cannot reach a process that left the group; the reaper must walk the tree",
+			escaped, cmd.Process.Pid, pgid, cmd.Process.Pid)
+	}
+}
+
+// TestTerminateShellCommandGroup_ReapsSetsidEscapeeAfterLeaderExits is the exact
+// shape of the motivating incident, and it is strictly harder than the
+// cancellation case.
+//
+// Gate run 01KY36EAXX53WZSEC4ZYSMY4F0 reported status=completed exit_code=0 while
+// leaking six xctest processes. Because the leader exited cleanly, the reap ran
+// from TerminateShellCommandGroup - after cmd.Wait returned, so after the leader
+// was already dead. By then the kernel has rewritten the escapee's ppid to 1, and
+// a snapshot taken at that moment has no trail back to this command at all.
+//
+// Only a descendant set sampled while the leader was still alive can catch this,
+// which is why the poller is load-bearing rather than a nice-to-have.
+func TestTerminateShellCommandGroup_ReapsSetsidEscapeeAfterLeaderExits(t *testing.T) {
+	defer setTrackerTickForTest(25 * time.Millisecond)()
+
+	pidFile := filepath.Join(t.TempDir(), "escaped.pid")
+	cmd := exec.CommandContext(context.Background(), os.Args[0], "-test.run=^TestSetsidEscapeHelper$")
+	cmd.Env = append(os.Environ(),
+		"NM_SHELLENV_SETSID_HELPER=leader-exits",
+		"NM_SHELLENV_SETSID_PID="+pidFile,
+	)
+	ConfigureShellCommand(cmd)
+	if err := StartShellCommand(cmd); err != nil {
+		t.Fatalf("StartShellCommand: %v", err)
+	}
+	leaderPID := cmd.Process.Pid
+
+	escaped := readPID(t, pidFile, 10*time.Second)
+	t.Cleanup(func() { _ = syscall.Kill(escaped, syscall.SIGKILL) })
+	waitForSampledDescendant(t, leaderPID, escaped, 15*time.Second)
+
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("leader Wait: %v", err)
+	}
+
+	// Precondition: the leader is gone and the escapee has been reparented, so
+	// no ppid link from the escapee reaches leaderPID any more.
+	snap, err := proctree.Snapshot()
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if got := pidSetOf(proctree.Descendants(snap, leaderPID)); got[escaped] {
+		t.Fatalf("precondition failed: escapee %d is still reachable from dead leader %d, "+
+			"so this test would not exercise the reparented path", escaped, leaderPID)
+	}
+
+	TerminateShellCommandGroup(cmd)
+
+	if !pidGoneWithin(escaped, 10*time.Second) {
+		t.Fatalf("setsid escapee %d survived clean exit of leader %d: this is the "+
+			"leak that left six xctest processes alive for three days", escaped, leaderPID)
+	}
+}
+
+func pidSetOf(procs []proctree.Proc) map[int]bool {
+	out := make(map[int]bool, len(procs))
+	for _, p := range procs {
+		out[p.PID] = true
+	}
+	return out
+}
+
+// TestSetsidEscapeHelper is the re-exec helper for the setsid escape tests. The
+// leader spawns a child and stays alive; the child calls setsid() to leave the
+// leader's process group, then records its pid and idles. Neither writes to the
+// inherited pipes, so these tests exercise reaping rather than pipe teardown.
+func TestSetsidEscapeHelper(t *testing.T) {
+	switch os.Getenv("NM_SHELLENV_SETSID_HELPER") {
+	case "leader":
+		child := exec.Command(os.Args[0], "-test.run=^TestSetsidEscapeHelper$")
+		child.Env = append(os.Environ(),
+			"NM_SHELLENV_SETSID_HELPER=escaped",
+			"NM_SHELLENV_SETSID_PID="+os.Getenv("NM_SHELLENV_SETSID_PID"),
+		)
+		if err := child.Start(); err != nil {
+			os.Exit(2)
+		}
+		time.Sleep(helperIdle)
+		os.Exit(0)
+	case "leader-exits":
+		// Same as "leader", but exits cleanly once the escapee has been sampled
+		// a few times, leaving it orphaned behind an exit code of 0.
+		child := exec.Command(os.Args[0], "-test.run=^TestSetsidEscapeHelper$")
+		child.Env = append(os.Environ(),
+			"NM_SHELLENV_SETSID_HELPER=escaped",
+			"NM_SHELLENV_SETSID_PID="+os.Getenv("NM_SHELLENV_SETSID_PID"),
+		)
+		if err := child.Start(); err != nil {
+			os.Exit(2)
+		}
+		time.Sleep(600 * time.Millisecond)
+		os.Exit(0)
+	case "escaped":
+		if _, err := syscall.Setsid(); err != nil {
+			os.Exit(3)
+		}
+		_ = os.WriteFile(os.Getenv("NM_SHELLENV_SETSID_PID"), []byte(strconv.Itoa(os.Getpid())), 0o644)
+		time.Sleep(helperIdle)
+		os.Exit(0)
+	}
+}
+
+// helperIdle is how long a re-exec helper lingers. It must outlast the reap
+// assertions so a survivor is a real leak rather than a helper that timed out.
+const helperIdle = 120 * time.Second
+
 // TestTerminateShellCommandGroup_NoopOnNilOrUnstarted guards the cheap safety
 // contract: a nil command, or one that was never started (no Process), must be
 // a no-op rather than panic or signal an arbitrary pid.
@@ -71,7 +237,15 @@ func TestCombinedOutputShellCommand_ReturnsCleanExitWithInheritedPipeGrandchild(
 	}
 }
 
+// TestCombinedOutputShellCommand_WaitDelayBoundsEscapedPipeHolder isolates the
+// WaitDelay backstop from the reaper on purpose.
+//
+// Sampling is pinned off so the escaped pipe holder survives the reap, which is
+// the only way to prove WaitDelay alone bounds Wait. That matters because the
+// reaper is best-effort - `ps` can be unavailable or a kill can be denied - and
+// WaitDelay is what stops a wedged parser in that case.
 func TestCombinedOutputShellCommand_WaitDelayBoundsEscapedPipeHolder(t *testing.T) {
+	defer setTrackerTickForTest(time.Hour)()
 	readyFile := filepath.Join(t.TempDir(), "ready")
 	cmd := exec.CommandContext(context.Background(), os.Args[0], "-test.run=^TestShellOutputPipeHelper$")
 	cmd.Env = append(os.Environ(),
@@ -169,4 +343,39 @@ func pidGoneWithin(pid int, window time.Duration) bool {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return syscall.Kill(pid, 0) == syscall.ESRCH
+}
+
+func setTrackerTickForTest(d time.Duration) func() {
+	trackerMu.Lock()
+	prevTick, prevFirst := trackerTick, trackerFirstSample
+	trackerTick, trackerFirstSample = d, d
+	trackerMu.Unlock()
+	return func() {
+		trackerMu.Lock()
+		trackerTick, trackerFirstSample = prevTick, prevFirst
+		trackerMu.Unlock()
+	}
+}
+
+// waitForSampledDescendant blocks until the poller has recorded descendantPID
+// under leaderPID.
+//
+// Tests that assert on reaping must wait for this rather than sleeping: whether
+// a sample landed before the reap is the difference between the guarantee under
+// test and the documented residual gap, and under the race detector a `ps` over
+// a thousand processes is slow enough to lose that race by accident.
+func waitForSampledDescendant(t *testing.T, leaderPID, descendantPID int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		if trackedDescendantSampled(leaderPID, descendantPID) {
+			return
+		}
+		select {
+		case <-sampleSignal():
+		case <-deadline:
+			t.Fatalf("timed out waiting for the poller to sample descendant %d under leader %d",
+				descendantPID, leaderPID)
+		}
+	}
 }
