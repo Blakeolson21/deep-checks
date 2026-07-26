@@ -81,6 +81,10 @@ skill-check:
 
 lint: skill-check
 	go vet ./...
+# The e2e suite is behind a build tag, so the untagged vet above cannot see it.
+# A signature change that misses an e2e call site otherwise compiles fine here
+# and only fails later in `make e2e`; vetting the tagged build catches it now.
+	go vet -tags e2e ./...
 
 fmt:
 	gofmt -w .
