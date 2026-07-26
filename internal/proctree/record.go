@@ -100,17 +100,44 @@ func RemoveRecord(dir string, leaderPID int) {
 // to a live command, so nothing is killed: another daemon owns it. Otherwise the
 // leader is gone and any recorded descendant that is still running with a
 // matching start time is an orphan, which is precisely what this recovers.
+//
+// A recorded group is only killed after its leader pid is re-verified against the
+// recorded start time of the same pid in Descendants (an escapee group leader is
+// always sampled into the descendant union). Records survive across daemon
+// restarts and can be days old, so a bare pgid list would be a licence to SIGKILL
+// a whole group that a recycled pid has since led - the collateral damage this
+// package exists to prevent. When the group leader's start time cannot be
+// confirmed the group kill is skipped and the start-time-guarded Kill of the
+// descendants is relied on instead, because failing to reap is recoverable and
+// killing the wrong group is not.
 func ReapRecord(rec Record) {
 	snap, err := snapshotFunc()
 	if err != nil {
 		return
 	}
+	live := make(map[int]Proc, len(snap))
 	for _, p := range snap {
 		if p.PID == rec.LeaderPID && sameProcess(rec.LeaderStart, p.Started) {
 			return // still live; not ours to reap
 		}
+		live[p.PID] = p
+	}
+	recordedStart := make(map[int]time.Time, len(rec.Descendants))
+	for _, d := range rec.Descendants {
+		recordedStart[d.PID] = d.Started
 	}
 	for _, pgid := range rec.Groups {
+		want, ok := recordedStart[pgid]
+		if !ok {
+			continue // no recorded start time for the group leader; cannot verify
+		}
+		now, ok := live[pgid]
+		if !ok {
+			continue // group leader already gone
+		}
+		if !sameProcess(want, now.Started) {
+			continue // pid recycled onto an unrelated group leader
+		}
 		KillGroup(pgid)
 	}
 	Kill(rec.Descendants)

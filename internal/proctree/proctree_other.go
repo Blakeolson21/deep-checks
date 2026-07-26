@@ -5,6 +5,7 @@ package proctree
 import (
 	"errors"
 	"syscall"
+	"time"
 )
 
 // errUnsupported keeps the package buildable on non-unix platforms. Windows
@@ -14,6 +15,8 @@ import (
 var errUnsupported = errors.New("proctree: process enumeration is unix-only")
 
 func snapshot() ([]Proc, error) { return nil, errUnsupported }
+
+func startTimes([]int) (map[int]time.Time, error) { return nil, errUnsupported }
 
 func killProcess(int, syscall.Signal) error { return errUnsupported }
 
