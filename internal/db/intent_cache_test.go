@@ -8,7 +8,7 @@ import (
 func TestUpdateRunIntent_RoundTrip(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/intent", "git@github.com:user/intent.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 
 	got, _ := d.GetRun(run.ID)
 	if got.Intent != nil || got.IntentSource != nil || got.IntentSessionID != nil || got.IntentScore != nil {

@@ -12,7 +12,7 @@ func TestGetStepResult_LegacyBabysitStepName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
-	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456", nil)
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestGetStepResult_LegacyBabysitStepName(t *testing.T) {
 func TestStepInsertAndGet(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 
 	step, err := d.InsertStepResult(run.ID, types.StepReview)
 	if err != nil {
@@ -70,7 +70,7 @@ func TestStepInsertAndGet(t *testing.T) {
 func TestStepsByRun(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 
 	// insert in reverse order to verify ordering
 	d.InsertStepResult(run.ID, types.StepLint)
@@ -99,7 +99,7 @@ func TestStepsByRun(t *testing.T) {
 func TestStartStep(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepReview)
 
 	if err := d.StartStep(step.ID); err != nil {
@@ -123,7 +123,7 @@ func TestStartStep(t *testing.T) {
 func TestStepActivity(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepReview)
 
 	if err := d.StartStep(step.ID); err != nil {
@@ -164,7 +164,7 @@ func TestStepActivity(t *testing.T) {
 func TestCompleteStep(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepReview)
 
 	if err := d.CompleteStep(step.ID, 0, 1500, "/logs/run-1/review.log"); err != nil {
@@ -191,7 +191,7 @@ func TestCompleteStep(t *testing.T) {
 func TestCompleteStepWithStatus(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepReview)
 
 	if err := d.CompleteStepWithStatus(step.ID, types.StepStatusSkipped, 0, 1500, "/logs/run-1/review.log"); err != nil {
@@ -218,7 +218,7 @@ func TestCompleteStepWithStatus(t *testing.T) {
 func TestUpdateStepStatusWithDuration(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepTest)
 
 	if err := d.UpdateStepStatusWithDuration(step.ID, types.StepStatusAwaitingApproval, 1200); err != nil {
@@ -237,7 +237,7 @@ func TestUpdateStepStatusWithDuration(t *testing.T) {
 func TestFailStep(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepReview)
 
 	if err := d.FailStep(step.ID, "agent crashed", 1500); err != nil {
@@ -258,7 +258,7 @@ func TestFailStep(t *testing.T) {
 func TestSetStepFindings(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepReview)
 
 	findings := `[{"severity":"warning","message":"unused variable"}]`
@@ -274,7 +274,7 @@ func TestSetStepFindings(t *testing.T) {
 func TestClearStepFindings(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepReview)
 
 	findings := `[{"severity":"warning","message":"unused variable"}]`
@@ -294,7 +294,7 @@ func TestClearStepFindings(t *testing.T) {
 func TestUpdateStepStatus(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepReview)
 
 	if err := d.UpdateStepStatus(step.ID, types.StepStatusAwaitingApproval); err != nil {

@@ -205,11 +205,17 @@ type RunInfo struct {
 	// driving agent's response. AwaitingAgentSince is the unix-seconds time it
 	// parked, so a supervisor can read "parked for N seconds" in one call. Both
 	// are observability only and clear the moment the agent responds.
-	AwaitingAgent      bool             `json:"awaiting_agent,omitempty"`
-	AwaitingAgentSince *int64           `json:"awaiting_agent_since,omitempty"`
-	Steps              []StepResultInfo `json:"steps,omitempty"`
-	CreatedAt          int64            `json:"created_at"`
-	UpdatedAt          int64            `json:"updated_at"`
+	AwaitingAgent      bool   `json:"awaiting_agent,omitempty"`
+	AwaitingAgentSince *int64 `json:"awaiting_agent_since,omitempty"`
+	// SkippedSteps is the run's recorded skip set, comma-joined in pipeline
+	// order. It is a pointer so the three answers stay distinct on the wire:
+	// nil means the run predates the recorded plan, an empty string means the
+	// run skips nothing and therefore reaches push, and a list names the steps
+	// it will not run. omitempty drops only the nil case.
+	SkippedSteps *string          `json:"skipped_steps,omitempty"`
+	Steps        []StepResultInfo `json:"steps,omitempty"`
+	CreatedAt    int64            `json:"created_at"`
+	UpdatedAt    int64            `json:"updated_at"`
 }
 
 // StepResultInfo is the IPC representation of a step result.

@@ -312,7 +312,7 @@ func TestPipeline_DocumentPlusLintIsOneAgentInvocation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
-	run, err := database.InsertRun(repo.ID, "refs/heads/feature", headSHA, baseSHA)
+	run, err := database.InsertRun(repo.ID, "refs/heads/feature", headSHA, baseSHA, nil)
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}

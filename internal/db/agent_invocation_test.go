@@ -364,7 +364,7 @@ func TestOpenMigratesAgentInvocationsAndParkedMS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
-	run, err := d.InsertRun(repo.ID, "b", "h", "b")
+	run, err := d.InsertRun(repo.ID, "b", "h", "b", nil)
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestOpenMigratesSessionFidelityColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
-	run, err := d.InsertRun(repo.ID, "b", "h", "b")
+	run, err := d.InsertRun(repo.ID, "b", "h", "b", nil)
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}

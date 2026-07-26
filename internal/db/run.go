@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -45,7 +46,13 @@ type Run struct {
 	// ParkedMS accumulates the run's total parked-at-gate wall time in
 	// milliseconds across every gate wait (local performance telemetry;
 	// step duration_ms values exclude this time).
-	ParkedMS        int64
+	ParkedMS int64
+	// SkippedSteps is the run's skip set, comma-joined in canonical pipeline
+	// order, recorded when the run is created so the consequence of answering a
+	// gate is knowable before the skipped steps are reached. It is nil only for
+	// runs that predate the column; a run that explicitly skips nothing records
+	// the empty string. Read it through SkipSteps.
+	SkippedSteps    *string
 	Intent          *string
 	IntentSource    *string
 	IntentSessionID *string
@@ -54,7 +61,11 @@ type Run struct {
 	UpdatedAt       int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, submitted_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
+// runColumns is positionally coupled to scanRun: the two must be edited
+// together. skipped_steps is deliberately not COALESCEd to an empty string:
+// that would erase the difference between a run with no recorded plan and one
+// that records skipping nothing.
+const runColumns = `id, repo_id, branch, head_sha, base_sha, submitted_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), skipped_steps, intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -65,14 +76,78 @@ func scanRun(row interface {
 		&r.LastPushedSHA, &r.PushTargetKind, &r.PushTargetFingerprint, &r.PushRef,
 		&r.LastPushedAt, &r.PushGeneration, &r.PushActive,
 		&r.CustodyReturnedAt, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS,
+		&r.SkippedSteps,
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
 		&r.CreatedAt, &r.UpdatedAt,
 	)
 }
 
-// InsertRun creates a new run record.
-func (d *DB) InsertRun(repoID, branch, headSHA, baseSHA string) (*Run, error) {
+// EncodeSkippedSteps renders a run's skip set for storage: canonical pipeline
+// order, comma-joined, deduplicated. Only names in types.AllSteps are kept, and
+// none of those contains a comma, so the separator is unambiguous. An empty set
+// encodes to the empty string, which records "skips nothing" rather than
+// "unrecorded" - the two are different answers and must not be conflated.
+func EncodeSkippedSteps(steps []types.StepName) string {
+	ordered := make([]types.StepName, 0, len(steps))
+	seen := make(map[types.StepName]bool, len(steps))
+	for _, step := range steps {
+		// A name outside types.AllSteps (Order 0) matches no pipeline step, so it
+		// cannot cause anything to be skipped. Recording it would describe a run
+		// that does not exist, and would sort ahead of every real step.
+		if seen[step] || step.Order() == 0 {
+			continue
+		}
+		seen[step] = true
+		ordered = append(ordered, step)
+	}
+	// The caller's order is the order the operator typed; canonical order is
+	// what makes the stored value comparable across runs.
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].Order() < ordered[j].Order()
+	})
+	parts := make([]string, len(ordered))
+	for i, step := range ordered {
+		parts[i] = string(step)
+	}
+	return strings.Join(parts, ",")
+}
+
+// SkipSteps decodes the recorded skip set. It returns nil when the run predates
+// the column (the plan is unknown), and a non-nil empty slice when the run
+// recorded that it skips nothing. Callers that must tell those apart should
+// test SkippedSteps for nil directly.
+//
+// An unrecognised step name is an error rather than a silently dropped entry:
+// dropping it would turn an unreadable plan into "skips nothing", which is the
+// reading that lets a recovered run push.
+func (r *Run) SkipSteps() ([]types.StepName, error) {
+	if r == nil || r.SkippedSteps == nil {
+		return nil, nil
+	}
+	parts := strings.Split(*r.SkippedSteps, ",")
+	steps := make([]types.StepName, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		step := types.StepName(trimmed)
+		// Order reports 0 for any name outside types.AllSteps.
+		if step.Order() == 0 {
+			return nil, fmt.Errorf("unknown step %q in recorded skip set %q", trimmed, *r.SkippedSteps)
+		}
+		steps = append(steps, step)
+	}
+	return steps, nil
+}
+
+// InsertRun creates a new run record. The skip set is written in the same
+// statement as the rest of the run on purpose: a run whose skip set landed in a
+// follow-up UPDATE could be recovered after a crash between the two and would
+// then execute the very steps the operator asked to skip.
+func (d *DB) InsertRun(repoID, branch, headSHA, baseSHA string, skipped []types.StepName) (*Run, error) {
 	ts := now()
+	skippedSteps := EncodeSkippedSteps(skipped)
 	r := &Run{
 		ID:               newID(),
 		RepoID:           repoID,
@@ -81,12 +156,13 @@ func (d *DB) InsertRun(repoID, branch, headSHA, baseSHA string) (*Run, error) {
 		BaseSHA:          baseSHA,
 		SubmittedHeadSHA: &headSHA,
 		Status:           types.RunPending,
+		SkippedSteps:     &skippedSteps,
 		CreatedAt:        ts,
 		UpdatedAt:        ts,
 	}
 	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, status, pr_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'none', ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.Status, r.CreatedAt, r.UpdatedAt,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, status, pr_state, skipped_steps, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.Status, skippedSteps, r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)

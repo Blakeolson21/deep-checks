@@ -19,7 +19,7 @@ func TestRunToInfoIncludesImmutableSubmittedHead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
-	run, err := d.InsertRun(repo.ID, "feature", "submitted-head", "base-head")
+	run, err := d.InsertRun(repo.ID, "feature", "submitted-head", "base-head", nil)
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestStepToInfoIncludesFixSummaries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
-	run, err := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, err := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestStepToInfoNoFixSummariesWithoutFixRounds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
-	run, err := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, err := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
@@ -101,5 +101,51 @@ func TestStepToInfoNoFixSummariesWithoutFixRounds(t *testing.T) {
 	info := stepToInfo(d, step)
 	if len(info.FixSummaries) != 0 {
 		t.Errorf("fix summaries = %v, want none", info.FixSummaries)
+	}
+}
+
+// The daemon is the only source of run data for the axi run drive loop, so a
+// skip set it fails to forward is invisible on that surface even though axi
+// status (which reads SQLite directly) shows it.
+func TestRunToInfoForwardsTheRecordedSkipSet(t *testing.T) {
+	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer d.Close()
+
+	repo, err := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	if err != nil {
+		t.Fatalf("insert repo: %v", err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "head", "base", []types.StepName{types.StepCI, types.StepPush})
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	run, err = d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+
+	info := runToInfo(d, run, nil)
+	if info.SkippedSteps == nil {
+		t.Fatal("run info dropped the skip set; the drive loop would never report it")
+	}
+	if *info.SkippedSteps != "push,ci" {
+		t.Errorf("SkippedSteps = %q, want %q", *info.SkippedSteps, "push,ci")
+	}
+
+	// A run that skips nothing still reports a value, so a reader can tell it
+	// apart from a run whose plan was never recorded.
+	none, err := d.InsertRun(repo.ID, "other", "head", "base", nil)
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	none, err = d.GetRun(none.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if info := runToInfo(d, none, nil); info.SkippedSteps == nil || *info.SkippedSteps != "" {
+		t.Errorf("SkippedSteps = %v, want a pointer to the empty string", info.SkippedSteps)
 	}
 }

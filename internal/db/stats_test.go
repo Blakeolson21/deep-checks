@@ -11,7 +11,7 @@ func TestGetStatsAggregatesReportedFixesAndRescueRuns(t *testing.T) {
 	repoA, _ := d.InsertRepo("/repo/a", "git@example.com:a.git", "main")
 	repoB, _ := d.InsertRepo("/repo/b", "git@example.com:b.git", "main")
 
-	runA, _ := d.InsertRun(repoA.ID, "feature-a", "head-a", "base-a")
+	runA, _ := d.InsertRun(repoA.ID, "feature-a", "head-a", "base-a", nil)
 	reviewA, _ := d.InsertStepResult(runA.ID, types.StepReview)
 	reviewAInitial := `{"findings":[{"id":"r1","severity":"warning","description":"one","action":"auto-fix"},{"id":"r2","severity":"warning","description":"two","action":"auto-fix"},{"id":"r3","severity":"warning","description":"three","action":"auto-fix"}],"summary":"three","risk_level":"medium","risk_rationale":"test"}`
 	reviewAFinal := `{"findings":[{"id":"r3","severity":"warning","description":"three","action":"ask-user"}],"summary":"one left","risk_level":"medium","risk_rationale":"test"}`
@@ -31,7 +31,7 @@ func TestGetStatsAggregatesReportedFixesAndRescueRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runB, _ := d.InsertRun(repoB.ID, "feature-b", "head-b", "base-b")
+	runB, _ := d.InsertRun(repoB.ID, "feature-b", "head-b", "base-b", nil)
 	testB, _ := d.InsertStepResult(runB.ID, types.StepTest)
 	testBInitial := `{"findings":[{"id":"t1","severity":"error","description":"test","action":"ask-user"}],"summary":"one","risk_level":"low","risk_rationale":"test"}`
 	if _, err := d.InsertStepRound(testB.ID, 1, "initial", &testBInitial, nil, 100); err != nil {
@@ -74,7 +74,7 @@ func TestGetStatsAggregatesReportedFixesAndRescueRuns(t *testing.T) {
 func TestGetStatsFallsBackToStepFindingsWhenRoundsAreMissing(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/repo/legacy", "git@example.com:legacy.git", "main")
-	run, _ := d.InsertRun(repo.ID, "legacy", "head", "base")
+	run, _ := d.InsertRun(repo.ID, "legacy", "head", "base", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepReview)
 	findings := `{"findings":[{"id":"legacy-1","severity":"warning","description":"legacy","action":"ask-user"}],"summary":"one","risk_level":"low","risk_rationale":"test"}`
 	if err := d.SetStepFindings(step.ID, findings); err != nil {
@@ -100,7 +100,7 @@ func TestGetStatsFallsBackToStepFindingsWhenRoundsAreMissing(t *testing.T) {
 func TestFixedFindingsByStepCountsResolvedRoundFindings(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/repo/fixes", "git@example.com:fixes.git", "main")
-	run, _ := d.InsertRun(repo.ID, "fixes", "head", "base")
+	run, _ := d.InsertRun(repo.ID, "fixes", "head", "base", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepReview)
 	initial := `{"findings":[{"id":"r1","severity":"warning","description":"one"},{"id":"r2","severity":"warning","description":"two"},{"id":"r3","severity":"warning","description":"three"}],"summary":"three"}`
 	final := `{"findings":[{"id":"r3","severity":"warning","description":"three"}],"summary":"one left"}`
@@ -123,7 +123,7 @@ func TestFixedFindingsByStepCountsResolvedRoundFindings(t *testing.T) {
 func TestStepFindingStatsDoesNotCountSelectedFindingsAsFixed(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/repo/fixing", "git@example.com:fixing.git", "main")
-	run, _ := d.InsertRun(repo.ID, "fixing", "head", "base")
+	run, _ := d.InsertRun(repo.ID, "fixing", "head", "base", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepReview)
 	initial := `{"findings":[{"id":"r1","severity":"warning","description":"one"},{"id":"r2","severity":"warning","description":"two"},{"id":"r3","severity":"warning","description":"three"}],"summary":"three"}`
 	round, err := d.InsertStepRound(step.ID, 1, "initial", &initial, nil, 100)
@@ -147,7 +147,7 @@ func TestStepFindingStatsDoesNotCountSelectedFindingsAsFixed(t *testing.T) {
 func TestStepFindingStatsAddsNewFindingsToTotal(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/repo/new-findings", "git@example.com:new.git", "main")
-	run, _ := d.InsertRun(repo.ID, "new", "head", "base")
+	run, _ := d.InsertRun(repo.ID, "new", "head", "base", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepReview)
 	initial := `{"findings":[{"id":"r1","severity":"warning","description":"one"},{"id":"r2","severity":"warning","description":"two"},{"id":"r3","severity":"warning","description":"three"}],"summary":"three"}`
 	final := `{"findings":[{"id":"r3","severity":"warning","description":"three"},{"id":"r4","severity":"warning","description":"four"}],"summary":"two left"}`

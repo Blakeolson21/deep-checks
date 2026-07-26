@@ -77,7 +77,7 @@ func newCLISyncFixture(t *testing.T) cliSyncFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := database.InsertRun(repo.ID, "feature/sync", old, base)
+	run, err := database.InsertRun(repo.ID, "feature/sync", old, base, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +411,7 @@ func newCLIRecoverFixture(t *testing.T) cliRecoverFixture {
 	preserved := cliGit(t, pipeline, "rev-parse", "HEAD")
 	cliGit(t, pipeline, "push", "origin", "HEAD:refs/heads/feature/recover")
 
-	run, err := database.InsertRun(repo.ID, "feature/recover", submitted, base)
+	run, err := database.InsertRun(repo.ID, "feature/recover", submitted, base, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

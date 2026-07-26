@@ -74,7 +74,7 @@ func reviewSessionHarness(t *testing.T, mock *sessionMockAgent, steps []pipeline
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
-	run, err := database.InsertRun(repo.ID, "refs/heads/feature", headSHA, baseSHA)
+	run, err := database.InsertRun(repo.ID, "refs/heads/feature", headSHA, baseSHA, nil)
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}

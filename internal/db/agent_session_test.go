@@ -16,7 +16,7 @@ func openSessionTestDB(t *testing.T) (*DB, *Repo, *Run) {
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
-	run, err := d.InsertRun(repo.ID, "feature/x", "head", "base")
+	run, err := d.InsertRun(repo.ID, "feature/x", "head", "base", nil)
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestRunAgentSessions_UpsertGetDelete(t *testing.T) {
 // other's session identities even for the same role and agent.
 func TestRunAgentSessions_IsolatedPerRun(t *testing.T) {
 	d, repo, run1 := openSessionTestDB(t)
-	run2, err := d.InsertRun(repo.ID, "feature/y", "head2", "base2")
+	run2, err := d.InsertRun(repo.ID, "feature/y", "head2", "base2", nil)
 	if err != nil {
 		t.Fatalf("insert run2: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestOpenMigratesRunAgentSessionsTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
-	run, err := d.InsertRun(repo.ID, "b", "h", "b")
+	run, err := d.InsertRun(repo.ID, "b", "h", "b", nil)
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}

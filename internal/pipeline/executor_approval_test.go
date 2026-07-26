@@ -336,3 +336,93 @@ func TestExecutor_TracksAutoFixTelemetry(t *testing.T) {
 		t.Fatalf("fix attempt = %v, want 1", got)
 	}
 }
+
+// A daemon restart must not execute steps the operator asked to skip. The skip
+// set is a plan that belongs to the run, not a property of the executor that
+// happened to start it: recovery builds a fresh executor, and one that resumes
+// without the plan pushes a branch the operator deliberately kept local.
+func TestExecutor_ResumeDoesNotExecuteSkippedRemainingSteps(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	review := newPassStep(types.StepReview)
+	push := newPassStep(types.StepPush)
+
+	gateResult, err := database.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The push row is still 'pending' at recovery time precisely because the run
+	// never reached it, which is what makes a reached-step status unable to
+	// answer "will this run push?" before the fact.
+	if _, err := database.InsertStepResult(run.ID, types.StepPush); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(gateResult.ID); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"needs a look","action":"ask-user"}],"summary":"one issue"}`
+	if err := database.SetStepFindings(gateResult.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.InsertStepRound(gateResult.ID, 1, "initial", &findings, nil, 25); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateStepStatusWithDuration(gateResult.ID, types.StepStatusAwaitingApproval, 25); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{review, push}, nil)
+	exec.SetSkippedSteps([]types.StepName{types.StepPush})
+	done := make(chan error, 1)
+	go func() {
+		done <- exec.Resume(context.Background(), run, repo, t.TempDir())
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("recovered gate never accepted a response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("resume: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovered executor timed out")
+	}
+
+	if got := push.callCount(); got != 0 {
+		t.Fatalf("recovered run executed the skipped push step %d times, want 0", got)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range steps {
+		if step.StepName == types.StepPush && step.Status != types.StepStatusSkipped {
+			t.Fatalf("push status = %s, want %s", step.Status, types.StepStatusSkipped)
+		}
+	}
+	resumed, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Status != types.RunCompleted {
+		t.Fatalf("recovered run status = %s, want completed", resumed.Status)
+	}
+}

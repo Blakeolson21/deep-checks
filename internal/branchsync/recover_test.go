@@ -79,7 +79,7 @@ func newRecoverFixture(t *testing.T, status types.RunStatus) *recoverFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := database.InsertRun(repo.ID, "feature/recover", submitted, base)
+	run, err := database.InsertRun(repo.ID, "feature/recover", submitted, base, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestRecoverCleanBehindFastForwardsAndReturnsCustody(t *testing.T) {
 	if after.State != StateCustodyReturned || after.NextAction == nil || after.NextAction.Code != "run_pipeline" {
 		t.Fatalf("post-recover inspection = %#v", after)
 	}
-	fresh, err := f.db.InsertRun(f.repo.ID, "feature/recover", f.preserved, f.base)
+	fresh, err := f.db.InsertRun(f.repo.ID, "feature/recover", f.preserved, f.base, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

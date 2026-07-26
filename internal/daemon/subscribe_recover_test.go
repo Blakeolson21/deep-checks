@@ -270,7 +270,7 @@ func TestRecoverStaleRunsOnStartup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	staleRun, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	staleRun, err := d.InsertRun(repo.ID, "feature", "abc123", "def456", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +360,7 @@ func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 	}
 	defer d.Close()
 	repo, headSHA := setupTestGitRepo(t, p, d, "resume-parked-run")
-	run, err := d.InsertRun(repo.ID, "main", headSHA, headSHA)
+	run, err := d.InsertRun(repo.ID, "main", headSHA, headSHA, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,7 +483,7 @@ func TestRecoverOnStartup_ReconcilesHistoricalCIGateFromCurrentPRState(t *testin
 			}
 			defer d.Close()
 			repo, headSHA := setupTestGitRepo(t, p, d, "reconcile-parked-ci-"+strings.ToLower(state))
-			run, err := d.InsertRun(repo.ID, "feature", headSHA, headSHA)
+			run, err := d.InsertRun(repo.ID, "feature", headSHA, headSHA, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -711,5 +711,131 @@ exit 0
 	}
 	if strings.Contains(content, ">/dev/null 2>&1 || true") {
 		t.Fatalf("migrated hook should not silently swallow notify-push errors, got:\n%s", content)
+	}
+}
+
+// A daemon restart must not publish work the operator asked to keep local.
+// This drives the real recovery chain (recoverOnStartup -> recoverableParkedRuns
+// -> prepareRecoveredRun -> resumeRecoveredRun -> Executor.Resume) for a run
+// parked at review whose recorded skip set excludes push.
+func TestRecoverOnStartup_ResumedRunHonoursItsRecordedSkipSet(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "dtest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
+	p := paths.WithRoot(tmpDir)
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	mockClaude := writeMockClaude(t, t.TempDir())
+	if err := os.WriteFile(p.ConfigFile(), []byte("agent: claude\nagent_path_override:\n  claude: "+mockClaude+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	repo, headSHA := setupTestGitRepo(t, p, d, "resume-skip-set")
+
+	run, err := d.InsertRun(repo.ID, "main", headSHA, headSHA, []types.StepName{types.StepPush})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	worktree := p.WorktreeDir(repo.ID, run.ID)
+	if err := gitpkg.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), worktree, headSHA); err != nil {
+		t.Fatal(err)
+	}
+	step, err := d.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Push has never been reached, so its row is 'pending' - the state that
+	// makes a reached-step status unable to say whether this run will push.
+	if _, err := d.InsertStepResult(run.ID, types.StepPush); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.StartStep(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"needs approval","action":"ask-user"}],"summary":"needs approval"}`
+	if err := d.SetStepFindings(step.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertStepRound(step.ID, 1, "initial", &findings, nil, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateStepStatusWithDuration(step.ID, types.StepStatusAwaitingApproval, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetRunAwaitingAgent(run.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	push := &mockPassStep{name: types.StepPush}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunWithOptions(p, d, func() []pipeline.Step {
+			return []pipeline.Step{&mockApprovalStep{name: types.StepReview}, push}
+		})
+	}()
+	defer func() {
+		client, err := ipc.Dial(p.Socket())
+		if err == nil {
+			_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
+			_ = client.Close()
+		}
+		select {
+		case <-errCh:
+		case <-time.After(3 * time.Second):
+			t.Error("daemon did not stop")
+		}
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	for {
+		if time.Now().After(deadline) {
+			t.Fatalf("recovered gate never accepted an approval: last error %v", lastErr)
+		}
+		client, err := ipc.Dial(p.Socket())
+		if err == nil {
+			var response ipc.RespondResult
+			err = client.Call(ipc.MethodRespond, &ipc.RespondParams{
+				RunID:  run.ID,
+				Step:   types.StepReview,
+				Action: types.ActionApprove,
+			}, &response)
+			_ = client.Close()
+			if err == nil {
+				break
+			}
+			lastErr = err
+		} else {
+			lastErr = err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	completed := waitForRunTerminalState(t, d, run.ID)
+	if completed.Status != types.RunCompleted {
+		t.Fatalf("recovered run status = %s, want completed", completed.Status)
+	}
+	if got := push.execCnt.Load(); got != 0 {
+		t.Fatalf("recovered run executed the skipped push step %d times, want 0: "+
+			"a restart must not publish work the operator kept local", got)
+	}
+	steps, err := d.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range steps {
+		if s.StepName == types.StepPush && s.Status != types.StepStatusSkipped {
+			t.Fatalf("push status = %s, want %s", s.Status, types.StepStatusSkipped)
+		}
 	}
 }

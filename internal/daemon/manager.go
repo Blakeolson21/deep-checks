@@ -76,6 +76,9 @@ type recoveredRunPlan struct {
 	cfg     *config.Config
 	agent   agent.Agent
 	steps   []pipeline.Step
+	// skipSteps is the run's own recorded skip set, decoded once while the plan
+	// is prepared. It is nil for runs that predate the recorded plan.
+	skipSteps []types.StepName
 }
 
 func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPlan {
@@ -136,6 +139,13 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if err := pipeline.ValidateRecoveredRun(m.db, run, execSteps); err != nil {
 		return nil, err
 	}
+	// Decode the skip set before the agent exists, so refusing an unreadable
+	// plan cannot leak an agent subprocess. Refusing is the safe direction: a
+	// plan we cannot read must not be resumed as though it skipped nothing.
+	skipSteps, err := run.SkipSteps()
+	if err != nil {
+		return nil, err
+	}
 	cfg, err := m.loadRecoveredConfig(ctx, run, repo, workDir)
 	if err != nil {
 		return nil, err
@@ -151,13 +161,14 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 		}
 	}
 	return &recoveredRunPlan{
-		run:     run,
-		repo:    repo,
-		workDir: workDir,
-		gateDir: gateDir,
-		cfg:     cfg,
-		agent:   ag,
-		steps:   execSteps,
+		run:       run,
+		repo:      repo,
+		workDir:   workDir,
+		gateDir:   gateDir,
+		cfg:       cfg,
+		agent:     ag,
+		steps:     execSteps,
+		skipSteps: skipSteps,
 	}, nil
 }
 
@@ -282,6 +293,11 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
+	// Restore the run's own skip set. A recovered run whose executor forgets it
+	// would reach push, pr and ci for the first time during recovery and publish
+	// work the operator asked to keep local. Runs that predate the recorded skip
+	// set report no plan, so recovery keeps the old behaviour for them.
+	executor.SetSkippedSteps(plan.skipSteps)
 	done := make(chan struct{})
 	m.mu.Lock()
 	m.executors[plan.run.ID] = executor
@@ -618,7 +634,11 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	m.cancelActiveRuns(repo.ID, branch)
 
 	// Create run record.
-	run, err := m.db.InsertRun(repo.ID, branch, headSHA, baseSHA)
+	// The skip set is recorded in the same statement that creates the run: it is
+	// the run's plan, and recovery reads it back to rebuild an executor that
+	// honours it. Persisting it in a follow-up write would leave a crash window
+	// in which a recovered run executes the steps the operator asked to skip.
+	run, err := m.db.InsertRun(repo.ID, branch, headSHA, baseSHA, skipSteps)
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)

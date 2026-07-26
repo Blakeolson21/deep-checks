@@ -165,10 +165,10 @@ func createLifecycleGuardRuns(t *testing.T, p *paths.Paths) {
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
-	if _, err := database.InsertRun(repo.ID, "feature-a", "aaa111", "000"); err != nil {
+	if _, err := database.InsertRun(repo.ID, "feature-a", "aaa111", "000", nil); err != nil {
 		t.Fatalf("insert pending run: %v", err)
 	}
-	running, err := database.InsertRun(repo.ID, "feature-b", "bbb222", "000")
+	running, err := database.InsertRun(repo.ID, "feature-b", "bbb222", "000", nil)
 	if err != nil {
 		t.Fatalf("insert running run: %v", err)
 	}

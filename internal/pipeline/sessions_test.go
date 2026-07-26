@@ -81,7 +81,7 @@ func sessionTestDB(t *testing.T) (*db.DB, *db.Run) {
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
-	run, err := d.InsertRun(repo.ID, "feature/x", "head", "base")
+	run, err := d.InsertRun(repo.ID, "feature/x", "head", "base", nil)
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestRunSessions_PersistsAcrossManagers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert repo2: %v", err)
 	}
-	otherRun, err := d.InsertRun(repo2.ID, "feature/y", "h", "b")
+	otherRun, err := d.InsertRun(repo2.ID, "feature/y", "h", "b", nil)
 	if err != nil {
 		t.Fatalf("insert other run: %v", err)
 	}

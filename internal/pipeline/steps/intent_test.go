@@ -31,7 +31,7 @@ func newIntentStepContext(t *testing.T) *pipeline.StepContext {
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
-	run, err := database.InsertRun(repo.ID, "refs/heads/feature", "head-sha", "base-sha")
+	run, err := database.InsertRun(repo.ID, "refs/heads/feature", "head-sha", "base-sha", nil)
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}

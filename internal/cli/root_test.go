@@ -49,7 +49,7 @@ func TestRootYesRunsWizardNonInteractively(t *testing.T) {
 		if state == nil {
 			t.Fatal("expected repo state")
 		}
-		if _, err := d.InsertRun(repo.ID, "feat/auto", "head1234", "base5678"); err != nil {
+		if _, err := d.InsertRun(repo.ID, "feat/auto", "head1234", "base5678", nil); err != nil {
 			return wizard.Result{}, err
 		}
 		return wizard.Result{Success: true, Pushed: true, TargetBranch: "feat/auto"}, nil
@@ -103,7 +103,7 @@ func TestRootSkipPassesStepsToWizard(t *testing.T) {
 	var gotSkip []types.StepName
 	runWizardAuto = func(ctx context.Context, p *paths.Paths, state *repoState, skipSteps []types.StepName, _ waitForRunFunc) (wizard.Result, error) {
 		gotSkip = append([]types.StepName(nil), skipSteps...)
-		if _, err := d.InsertRun(repo.ID, "feat/auto", "head1234", "base5678"); err != nil {
+		if _, err := d.InsertRun(repo.ID, "feat/auto", "head1234", "base5678", nil); err != nil {
 			return wizard.Result{}, err
 		}
 		return wizard.Result{Success: true, Pushed: true, TargetBranch: "feat/auto"}, nil
@@ -161,7 +161,7 @@ func TestRootYesUsesVisibleWizardWhenInteractive(t *testing.T) {
 		if state == nil {
 			t.Fatal("expected repo state")
 		}
-		if _, err := d.InsertRun(repo.ID, "feat/visible", "head1234", "base5678"); err != nil {
+		if _, err := d.InsertRun(repo.ID, "feat/visible", "head1234", "base5678", nil); err != nil {
 			return wizard.Result{}, err
 		}
 		return wizard.Result{Success: true, Pushed: true, TargetBranch: "feat/visible"}, nil

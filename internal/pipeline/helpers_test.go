@@ -77,7 +77,7 @@ func setupTest(t *testing.T) (*db.DB, *paths.Paths, *db.Run, *db.Repo) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := database.InsertRun(repo.ID, "feature", "abc123", "def456")
+	run, err := database.InsertRun(repo.ID, "feature", "abc123", "def456", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

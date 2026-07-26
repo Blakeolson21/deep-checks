@@ -99,7 +99,12 @@ type runView struct {
 	// awaiting the driving agent, or nil when the run is not parked. It powers
 	// the top-level parked signal in the run object.
 	AwaitingAgentSince *int64
-	Steps              []stepView
+	// SkippedSteps is the run's recorded skip set, comma-joined in pipeline
+	// order, or nil for a run that predates the recorded plan. The pointer is
+	// carried rather than flattened because an empty string ("skips nothing,
+	// so this run reaches push") and no record at all are different answers.
+	SkippedSteps *string
+	Steps        []stepView
 }
 
 func runViewFromIPC(r *ipc.RunInfo) runView {
@@ -109,6 +114,7 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		Status:             string(r.Status),
 		HeadSHA:            r.HeadSHA,
 		AwaitingAgentSince: r.AwaitingAgentSince,
+		SkippedSteps:       r.SkippedSteps,
 	}
 	if r.PRURL != nil {
 		rv.PRURL = *r.PRURL
@@ -148,6 +154,7 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
 		Status:             string(r.Status),
 		HeadSHA:            r.HeadSHA,
 		AwaitingAgentSince: r.AwaitingAgentSince,
+		SkippedSteps:       r.SkippedSteps,
 	}
 	if r.PRURL != nil {
 		rv.PRURL = *r.PRURL
@@ -410,6 +417,19 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 	// while genuinely parked (non-nil marker on a non-terminal run).
 	if rv.AwaitingAgentSince != nil && !terminalStatus(rv.Status) {
 		fields = append(fields, toon.Field{Key: "awaiting_agent", Value: formatParkedFor(*rv.AwaitingAgentSince)})
+	}
+	// The run's skip set says what answering a gate causes, which no per-step
+	// status can: a step the run has not reached reads 'pending' whether it
+	// will run or be skipped. It stays visible on terminal runs too, since
+	// reading it back is how an operator confirms a finished run never pushed.
+	// Only runs recorded before this plan existed omit it, and they claim
+	// nothing rather than claiming they skip nothing.
+	if rv.SkippedSteps != nil {
+		skipped := *rv.SkippedSteps
+		if skipped == "" {
+			skipped = "none"
+		}
+		fields = append(fields, toon.Field{Key: "skipped_steps", Value: skipped})
 	}
 	fields = append(fields, toon.Field{Key: "head", Value: shortSHA(rv.HeadSHA)})
 	if rv.PRURL != "" {

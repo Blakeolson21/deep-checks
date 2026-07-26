@@ -199,7 +199,7 @@ func TestStatusRendersCurrentAutoFixAttemptWithPersistedLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
-	run, err := database.InsertRun(repo.ID, "feature/current", "abcdef1234567890", "base")
+	run, err := database.InsertRun(repo.ID, "feature/current", "abcdef1234567890", "base", nil)
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
@@ -528,7 +528,7 @@ func TestAxiHomeStartsCurrentBranchWhenOtherBranchIsActive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
-	other, err := database.InsertRun(repo.ID, "feature/other", "head-other", "base")
+	other, err := database.InsertRun(repo.ID, "feature/other", "head-other", "base", nil)
 	if err != nil {
 		t.Fatalf("insert other run: %v", err)
 	}
@@ -626,7 +626,7 @@ func TestAxiStatusIgnoresInvalidGlobalConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
-	dbRun, err := database.InsertRun(repo.ID, "main", "head", "base")
+	dbRun, err := database.InsertRun(repo.ID, "main", "head", "base", nil)
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
@@ -734,14 +734,14 @@ func TestResolveRunPrefersCurrentBranchLatestRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
-	current, err := database.InsertRun(repo.ID, "feature/current", "head-current", "base")
+	current, err := database.InsertRun(repo.ID, "feature/current", "head-current", "base", nil)
 	if err != nil {
 		t.Fatalf("insert current run: %v", err)
 	}
 	if err := database.UpdateRunStatus(current.ID, types.RunCompleted); err != nil {
 		t.Fatalf("complete current run: %v", err)
 	}
-	other, err := database.InsertRun(repo.ID, "feature/other", "head-other", "base")
+	other, err := database.InsertRun(repo.ID, "feature/other", "head-other", "base", nil)
 	if err != nil {
 		t.Fatalf("insert other run: %v", err)
 	}
@@ -775,5 +775,90 @@ func TestSkillExitCodeGuidanceDistinguishesDecisionGates(t *testing.T) {
 	}
 	if !strings.Contains(md, "decision gates") {
 		t.Fatal("skill should explicitly identify decision gates as normal exit 0 stops")
+	}
+}
+
+// The skip set answers "what does answering this gate cause?" before the
+// skipped steps are reached, which a per-step status cannot: an unreached step
+// reads 'pending' whether it will run or be skipped.
+func TestRunObjectRendersTheRecordedSkipSet(t *testing.T) {
+	skipped := "push,pr,ci"
+	rv := runView{
+		ID:           "run-1",
+		Branch:       "feature/x",
+		Status:       string(types.RunRunning),
+		HeadSHA:      "abcdef1234567890",
+		SkippedSteps: &skipped,
+		Steps:        []stepView{{Name: "review", Status: "awaiting_approval"}},
+	}
+	out := axiDoc(runObjectField(rv))
+	if !strings.Contains(out, "push,pr,ci") {
+		t.Errorf("run object missing recorded skip set in:\n%s", out)
+	}
+	if !strings.Contains(out, "skipped_steps:") {
+		t.Errorf("run object missing skipped_steps key in:\n%s", out)
+	}
+
+	// A run that explicitly skips nothing must say so in words. Rendering it as
+	// an empty value reads like missing data, which is the ambiguity this field
+	// exists to remove.
+	empty := ""
+	rv.SkippedSteps = &empty
+	out = axiDoc(runObjectField(rv))
+	if !strings.Contains(out, "skipped_steps: none\n") {
+		t.Errorf("a run that skips nothing should render 'none' in:\n%s", out)
+	}
+
+	// Only runs predating the recorded plan omit the field; nothing is claimed
+	// about them.
+	rv.SkippedSteps = nil
+	if out := axiDoc(runObjectField(rv)); strings.Contains(out, "skipped_steps") {
+		t.Errorf("a run with no recorded plan should omit skipped_steps in:\n%s", out)
+	}
+
+	// The plan stays visible after the run ends: reading it back is how an
+	// operator confirms a finished run never pushed.
+	rv.SkippedSteps = &skipped
+	rv.Status = string(types.RunCompleted)
+	if out := axiDoc(runObjectField(rv)); !strings.Contains(out, "skipped_steps:") {
+		t.Errorf("terminal run should still report its skip set in:\n%s", out)
+	}
+}
+
+// axi status reads SQLite directly while the axi run drive loop reads the same
+// run over IPC. Both must carry the skip set, and both must keep it a pointer:
+// if either drops it, the field silently never renders on that surface, and if
+// either flattens it, "skips nothing" and "no record" become the same answer.
+func TestRunViewCarriesTheSkipSetFromBothSources(t *testing.T) {
+	recorded := "push,pr,ci"
+	empty := ""
+
+	for _, tc := range []struct {
+		name  string
+		value *string
+	}{
+		{"recorded", &recorded},
+		{"explicitly empty", &empty},
+		{"unrecorded", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fromDB := runViewFromDB(&db.Run{ID: "r1", SkippedSteps: tc.value}, nil)
+			fromIPC := runViewFromIPC(&ipc.RunInfo{ID: "r1", SkippedSteps: tc.value})
+
+			for source, got := range map[string]*string{"db": fromDB.SkippedSteps, "ipc": fromIPC.SkippedSteps} {
+				if tc.value == nil {
+					if got != nil {
+						t.Errorf("%s: SkippedSteps = %q, want nil so an unrecorded run claims nothing", source, *got)
+					}
+					continue
+				}
+				if got == nil {
+					t.Fatalf("%s: SkippedSteps = nil, want %q; the surface would never render it", source, *tc.value)
+				}
+				if *got != *tc.value {
+					t.Errorf("%s: SkippedSteps = %q, want %q", source, *got, *tc.value)
+				}
+			}
+		})
 	}
 }

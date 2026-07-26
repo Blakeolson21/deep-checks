@@ -25,7 +25,7 @@ func TestStatsAgentsReportsLocalPerformanceTelemetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := d.InsertRun(repo.ID, "feature/x", "abc", "def")
+	run, err := d.InsertRun(repo.ID, "feature/x", "abc", "def", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestStatsRendersPopulatedFidelityMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := d.InsertRun(repo.ID, "feature/x", "abc", "def")
+	run, err := d.InsertRun(repo.ID, "feature/x", "abc", "def", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

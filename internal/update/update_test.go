@@ -257,11 +257,11 @@ func TestUpdaterRunRefusesWithActiveRunsAndListsThem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
-	pendingRun, err := database.InsertRun(repo.ID, "feature-a", "aaa111", "000")
+	pendingRun, err := database.InsertRun(repo.ID, "feature-a", "aaa111", "000", nil)
 	if err != nil {
 		t.Fatalf("insert pending run: %v", err)
 	}
-	runningRun, err := database.InsertRun(repo.ID, "feature-b", "bbb222", "000")
+	runningRun, err := database.InsertRun(repo.ID, "feature-b", "bbb222", "000", nil)
 	if err != nil {
 		t.Fatalf("insert running run: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestUpdaterActiveRunGuardAllowsForce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
-	if _, err := database.InsertRun(repo.ID, "feature-a", "aaa111", "000"); err != nil {
+	if _, err := database.InsertRun(repo.ID, "feature-a", "aaa111", "000", nil); err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
 	if err := database.Close(); err != nil {

@@ -127,7 +127,7 @@ func setupCIGateReconcileTest(t *testing.T) (*db.DB, *paths.Paths, *db.Run, *db.
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := database.InsertRun(repo.ID, "refs/heads/feature", headSHA, baseSHA)
+	run, err := database.InsertRun(repo.ID, "refs/heads/feature", headSHA, baseSHA, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

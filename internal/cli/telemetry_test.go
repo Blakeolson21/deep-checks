@@ -198,7 +198,7 @@ func TestAttachTracksTUIPageview(t *testing.T) {
 
 	startTestDaemon(t, p, d)
 
-	run, err := d.InsertRun(repo.ID, "feature/test", "abc123", "def456")
+	run, err := d.InsertRun(repo.ID, "feature/test", "abc123", "def456", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

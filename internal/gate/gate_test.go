@@ -540,7 +540,7 @@ func TestInitReattachesGateAfterWorkingDirRename(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first init: %v", err)
 	}
-	if _, err := d.InsertRun(first.ID, "feature", "headsha", "basesha"); err != nil {
+	if _, err := d.InsertRun(first.ID, "feature", "headsha", "basesha", nil); err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
 

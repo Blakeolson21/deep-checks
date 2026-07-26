@@ -40,7 +40,7 @@ func TestRecoverOnStartup_DoesNotDeleteActiveRunWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	activeRun, err := d.InsertRun(repo.ID, "feature", "headsha", "basesha")
+	activeRun, err := d.InsertRun(repo.ID, "feature", "headsha", "basesha", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestRecoverOnStartup_DoesNotDeleteActiveRunWorktree(t *testing.T) {
 	}
 
 	// A terminal run's worktree, for contrast: cleanup should remove this one.
-	terminalRun, err := d.InsertRun(repo.ID, "old-branch", "headsha2", "basesha2")
+	terminalRun, err := d.InsertRun(repo.ID, "old-branch", "headsha2", "basesha2", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestRunWithOptions_RequiresSingletonLockBeforeRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := d.InsertRun(repo.ID, "feature", "headsha", "basesha")
+	run, err := d.InsertRun(repo.ID, "feature", "headsha", "basesha", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

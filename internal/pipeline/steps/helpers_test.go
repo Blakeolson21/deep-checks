@@ -402,7 +402,7 @@ func newTestContextWithDBRecords(t *testing.T, ag agent.Agent, workDir, baseSHA,
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := sctx.DB.InsertRun(repo.ID, "refs/heads/feature", headSHA, baseSHA)
+	run, err := sctx.DB.InsertRun(repo.ID, "refs/heads/feature", headSHA, baseSHA, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

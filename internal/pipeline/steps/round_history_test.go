@@ -23,7 +23,7 @@ func newRoundHistoryContext(t *testing.T) (*pipeline.StepContext, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := database.InsertRun(repo.ID, "refs/heads/feature", "head", "base")
+	run, err := database.InsertRun(repo.ID, "refs/heads/feature", "head", "base", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

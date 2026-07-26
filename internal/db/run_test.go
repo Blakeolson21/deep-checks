@@ -1,6 +1,8 @@
 package db
 
 import (
+	"database/sql"
+	"path/filepath"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -10,7 +12,7 @@ func TestRunInsertAndGet(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
 
-	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456", nil)
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
@@ -36,7 +38,7 @@ func TestRunInsertAndGet(t *testing.T) {
 func TestRunAwaitingAgentSetAndClear(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456", nil)
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
@@ -78,7 +80,7 @@ func TestRunAwaitingAgentSetAndClear(t *testing.T) {
 func TestRecoverStaleRunsClearsAwaitingAgent(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc123", "def456", nil)
 	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 		t.Fatalf("set running: %v", err)
 	}
@@ -117,8 +119,8 @@ func TestRunGetNotFound(t *testing.T) {
 func TestRunsByRepo(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	d.InsertRun(repo.ID, "feature-1", "aaa", "bbb")
-	d.InsertRun(repo.ID, "feature-2", "ccc", "ddd")
+	d.InsertRun(repo.ID, "feature-1", "aaa", "bbb", nil)
+	d.InsertRun(repo.ID, "feature-2", "ccc", "ddd", nil)
 
 	runs, err := d.GetRunsByRepo(repo.ID)
 	if err != nil {
@@ -137,10 +139,10 @@ func TestRunsByRepoHead(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
 
-	older, _ := d.InsertRun(repo.ID, "feature", "head-1", "base")
-	d.InsertRun(repo.ID, "feature", "head-2", "base") // same branch, other head
-	d.InsertRun(repo.ID, "other", "head-1", "base")   // same head, other branch
-	newer, _ := d.InsertRun(repo.ID, "feature", "head-1", "base")
+	older, _ := d.InsertRun(repo.ID, "feature", "head-1", "base", nil)
+	d.InsertRun(repo.ID, "feature", "head-2", "base", nil) // same branch, other head
+	d.InsertRun(repo.ID, "other", "head-1", "base", nil)   // same head, other branch
+	newer, _ := d.InsertRun(repo.ID, "feature", "head-1", "base", nil)
 
 	runs, err := d.GetRunsByRepoHead(repo.ID, "feature", "head-1")
 	if err != nil {
@@ -176,7 +178,7 @@ func TestActiveRun(t *testing.T) {
 		t.Fatal("expected nil active run")
 	}
 
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	active, _ = d.GetActiveRun(repo.ID, "")
 	if active == nil || active.ID != run.ID {
 		t.Fatal("expected active run matching inserted run")
@@ -195,8 +197,8 @@ func TestActiveRunStrictBranchMatch(t *testing.T) {
 	repo, _ := d.InsertRepo("/home/user/branchpref", "git@github.com:user/branchpref.git", "main")
 
 	// Create two active runs on different branches.
-	runA, _ := d.InsertRun(repo.ID, "feature-a", "aaa", "000")
-	runB, _ := d.InsertRun(repo.ID, "feature-b", "bbb", "000")
+	runA, _ := d.InsertRun(repo.ID, "feature-a", "aaa", "000", nil)
+	runB, _ := d.InsertRun(repo.ID, "feature-b", "bbb", "000", nil)
 
 	// Without branch hint, newest (runB) wins.
 	active, err := d.GetActiveRun(repo.ID, "")
@@ -242,20 +244,20 @@ func TestActiveRunsAcrossRepos(t *testing.T) {
 	repoA, _ := d.InsertRepo("/home/user/project-a", "git@github.com:user/project-a.git", "main")
 	repoB, _ := d.InsertRepo("/home/user/project-b", "git@github.com:user/project-b.git", "main")
 
-	pendingRun, _ := d.InsertRun(repoA.ID, "feature-a", "aaa", "000")
-	runningRun, _ := d.InsertRun(repoB.ID, "feature-b", "bbb", "000")
+	pendingRun, _ := d.InsertRun(repoA.ID, "feature-a", "aaa", "000", nil)
+	runningRun, _ := d.InsertRun(repoB.ID, "feature-b", "bbb", "000", nil)
 	if err := d.UpdateRunStatus(runningRun.ID, types.RunRunning); err != nil {
 		t.Fatalf("mark running: %v", err)
 	}
-	completedRun, _ := d.InsertRun(repoA.ID, "done", "ccc", "000")
+	completedRun, _ := d.InsertRun(repoA.ID, "done", "ccc", "000", nil)
 	if err := d.UpdateRunStatus(completedRun.ID, types.RunCompleted); err != nil {
 		t.Fatalf("mark completed: %v", err)
 	}
-	failedRun, _ := d.InsertRun(repoB.ID, "failed", "ddd", "000")
+	failedRun, _ := d.InsertRun(repoB.ID, "failed", "ddd", "000", nil)
 	if err := d.UpdateRunStatus(failedRun.ID, types.RunFailed); err != nil {
 		t.Fatalf("mark failed: %v", err)
 	}
-	cancelledRun, _ := d.InsertRun(repoB.ID, "cancelled", "eee", "000")
+	cancelledRun, _ := d.InsertRun(repoB.ID, "cancelled", "eee", "000", nil)
 	if err := d.UpdateRunStatus(cancelledRun.ID, types.RunCancelled); err != nil {
 		t.Fatalf("mark cancelled: %v", err)
 	}
@@ -292,7 +294,7 @@ func TestActiveRunsAcrossRepos(t *testing.T) {
 func TestUpdateRunStatus(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 
 	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 		t.Fatalf("update status: %v", err)
@@ -306,7 +308,7 @@ func TestUpdateRunStatus(t *testing.T) {
 func TestRunPushBindingIsForwardOnlyAndLegacyRowsStayNullable(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/tmp/repo-sync-binding", "https://example.com/repo.git", "main")
-	run, err := d.InsertRun(repo.ID, "feature", "submitted", "base")
+	run, err := d.InsertRun(repo.ID, "feature", "submitted", "base", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +337,7 @@ func TestRunPushBindingIsForwardOnlyAndLegacyRowsStayNullable(t *testing.T) {
 func TestUpdateRunPRURL(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 
 	prURL := "https://github.com/user/project/pull/1"
 	if err := d.UpdateRunPRURL(run.ID, prURL); err != nil {
@@ -350,7 +352,7 @@ func TestUpdateRunPRURL(t *testing.T) {
 func TestUpdateRunHeadSHA(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 
 	if err := d.UpdateRunHeadSHA(run.ID, "xyz"); err != nil {
 		t.Fatalf("update head sha: %v", err)
@@ -364,7 +366,7 @@ func TestUpdateRunHeadSHA(t *testing.T) {
 func TestUpdateRunError(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 
 	if err := d.UpdateRunError(run.ID, "something broke"); err != nil {
 		t.Fatalf("update error: %v", err)
@@ -381,7 +383,7 @@ func TestUpdateRunError(t *testing.T) {
 func TestCascadeDeleteRepo(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepReview)
 
 	if err := d.DeleteRepo(repo.ID); err != nil {
@@ -402,10 +404,10 @@ func TestRecoverStaleRunsMarksRunsFailed(t *testing.T) {
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
 
 	// Create runs in various statuses.
-	pendingRun, _ := d.InsertRun(repo.ID, "feat-a", "aaa", "bbb")
-	runningRun, _ := d.InsertRun(repo.ID, "feat-b", "ccc", "ddd")
+	pendingRun, _ := d.InsertRun(repo.ID, "feat-a", "aaa", "bbb", nil)
+	runningRun, _ := d.InsertRun(repo.ID, "feat-b", "ccc", "ddd", nil)
 	d.UpdateRunStatus(runningRun.ID, types.RunRunning)
-	completedRun, _ := d.InsertRun(repo.ID, "feat-c", "eee", "fff")
+	completedRun, _ := d.InsertRun(repo.ID, "feat-c", "eee", "fff", nil)
 	d.UpdateRunStatus(completedRun.ID, types.RunCompleted)
 
 	count, err := d.RecoverStaleRuns("daemon crashed")
@@ -440,8 +442,8 @@ func TestRecoverStaleRunsMarksRunsFailed(t *testing.T) {
 func TestRecoverStaleRunsExceptPreservesOnlyValidatedRuns(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/recovery-project", "git@github.com:user/recovery-project.git", "main")
-	preserved, _ := d.InsertRun(repo.ID, "feat-a", "aaa", "bbb")
-	stale, _ := d.InsertRun(repo.ID, "feat-b", "ccc", "ddd")
+	preserved, _ := d.InsertRun(repo.ID, "feat-a", "aaa", "bbb", nil)
+	stale, _ := d.InsertRun(repo.ID, "feat-b", "ccc", "ddd", nil)
 	if err := d.UpdateRunStatus(preserved.ID, types.RunRunning); err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +481,7 @@ func TestRecoverStaleRunsExceptPreservesOnlyValidatedRuns(t *testing.T) {
 func TestRecoverStaleRunsMarksStepsFailed(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project2", "git@github.com:user/project2.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 
 	// Create steps in various statuses.
 	runningStep, _ := d.InsertStepResult(run.ID, types.StepReview)
@@ -521,7 +523,7 @@ func TestRecoverStaleRunsNoStaleRuns(t *testing.T) {
 	repo, _ := d.InsertRepo("/home/user/project3", "git@github.com:user/project3.git", "main")
 
 	// Only completed runs.
-	run, _ := d.InsertRun(repo.ID, "feat", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feat", "abc", "def", nil)
 	d.UpdateRunStatus(run.ID, types.RunCompleted)
 
 	count, err := d.RecoverStaleRuns("daemon crashed")
@@ -536,7 +538,7 @@ func TestRecoverStaleRunsNoStaleRuns(t *testing.T) {
 func TestSetRunCustodyReturnedStampsOnceAndSurvivesStatusUpdates(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/custody", "git@github.com:user/custody.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feat", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feat", "abc", "def", nil)
 
 	got, err := d.GetRun(run.ID)
 	if err != nil || got.CustodyReturnedAt != nil {
@@ -562,5 +564,151 @@ func TestSetRunCustodyReturnedStampsOnceAndSurvivesStatusUpdates(t *testing.T) {
 	got, _ = d.GetRun(run.ID)
 	if got.CustodyReturnedAt == nil || *got.CustodyReturnedAt != first {
 		t.Fatalf("custody stamp changed: %#v, want %d", got.CustodyReturnedAt, first)
+	}
+}
+
+// A run's skip set must be knowable before the skipped steps are reached.
+// step_results.status only becomes 'skipped' once the executor arrives at the
+// step, so until then 'pending' cannot be told apart from "will run". These
+// tests pin the persisted plan that closes that gap.
+
+func TestInsertRunPersistsSkippedStepsInCanonicalOrder(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+
+	// Deliberately out of pipeline order: parseSkipSteps preserves the order the
+	// operator typed, so the persisted form is what imposes canonical order.
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456",
+		[]types.StepName{types.StepCI, types.StepPush, types.StepPR})
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if got.SkippedSteps == nil {
+		t.Fatal("skip set read back as unrecorded, want a recorded set")
+	}
+	if *got.SkippedSteps != "push,pr,ci" {
+		t.Errorf("skipped_steps = %q, want %q", *got.SkippedSteps, "push,pr,ci")
+	}
+	steps, err := got.SkipSteps()
+	if err != nil {
+		t.Fatalf("decode skip set: %v", err)
+	}
+	if len(steps) != 3 || steps[0] != types.StepPush || steps[1] != types.StepPR || steps[2] != types.StepCI {
+		t.Errorf("SkipSteps() = %v, want [push pr ci]", steps)
+	}
+}
+
+// The load-bearing distinction: a run that explicitly skips nothing records an
+// EMPTY set, never NULL. A reader that conflates the two either warns that a
+// contained run will push, or promises that an unknown run stays local.
+func TestInsertRunRecordsAnEmptySkipSetRatherThanLeavingItUnrecorded(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456", nil)
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if got.SkippedSteps == nil {
+		t.Fatal("a run that skips nothing recorded NULL; NULL means \"unrecorded\", " +
+			"so this run would never be reported as pushing")
+	}
+	if *got.SkippedSteps != "" {
+		t.Errorf("skipped_steps = %q, want empty string", *got.SkippedSteps)
+	}
+	steps, err := got.SkipSteps()
+	if err != nil {
+		t.Fatalf("decode skip set: %v", err)
+	}
+	if len(steps) != 0 {
+		t.Errorf("SkipSteps() = %v, want empty", steps)
+	}
+}
+
+// Only rows written before the column existed stay NULL.
+func TestOpenLeavesPreExistingRunsWithAnUnrecordedSkipSet(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.sqlite")
+	legacy, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`
+		CREATE TABLE repos (id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE, upstream_url TEXT NOT NULL, default_branch TEXT NOT NULL DEFAULT 'main', created_at INTEGER NOT NULL);
+		CREATE TABLE runs (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL, head_sha TEXT NOT NULL, base_sha TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', pr_url TEXT, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+		INSERT INTO repos VALUES ('repo-1', '/work/repo', 'https://example.com/repo.git', 'main', 1);
+		INSERT INTO runs VALUES ('run-1', 'repo-1', 'feature', 'head', 'base', 'completed', NULL, NULL, 1, 1);
+	`)
+	if err != nil {
+		legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	d, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	run, err := d.GetRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run == nil {
+		t.Fatal("legacy run missing after migration")
+	}
+	if run.SkippedSteps != nil {
+		t.Fatalf("legacy run gained a skip set %q; a run that predates the column "+
+			"must stay unrecorded rather than claim it skips nothing", *run.SkippedSteps)
+	}
+	steps, err := run.SkipSteps()
+	if err != nil {
+		t.Fatalf("decode skip set: %v", err)
+	}
+	if steps != nil {
+		t.Fatalf("SkipSteps() = %v, want nil for an unrecorded run", steps)
+	}
+}
+
+// An unreadable skip set must be an error, never an empty one. A decoder that
+// quietly drops a name it does not recognise reports "skips nothing", which is
+// the same false promise this column exists to prevent - it would push.
+func TestSkipStepsRejectsAnUnknownStepRatherThanReportingNoSkips(t *testing.T) {
+	stored := "push,not-a-step,ci"
+	run := &Run{SkippedSteps: &stored}
+
+	steps, err := run.SkipSteps()
+	if err == nil {
+		t.Fatalf("SkipSteps() = %v, want an error naming the unreadable step", steps)
+	}
+	if steps != nil {
+		t.Errorf("SkipSteps() returned %v alongside its error, want nil", steps)
+	}
+}
+
+// The stored plan must describe what the run will actually do. A name that
+// matches no pipeline step cannot cause a step to be skipped, so recording it
+// would both misdescribe the run and, because an unreadable plan is refused,
+// make the run unrecoverable over a restart. The CLI rejects such names at the
+// flag; this keeps a direct IPC caller from storing one.
+func TestEncodeSkippedStepsRecordsOnlyStepsThatCanActuallyBeSkipped(t *testing.T) {
+	got := EncodeSkippedSteps([]types.StepName{types.StepCI, "not-a-step", types.StepPush})
+	if got != "push,ci" {
+		t.Errorf("EncodeSkippedSteps() = %q, want %q", got, "push,ci")
+	}
+
+	// Duplicates collapse, so the same request always stores the same bytes.
+	if got := EncodeSkippedSteps([]types.StepName{types.StepCI, types.StepPush, types.StepCI}); got != "push,ci" {
+		t.Errorf("EncodeSkippedSteps() with a duplicate = %q, want %q", got, "push,ci")
 	}
 }

@@ -163,6 +163,13 @@ var migrationStatements = []string{
 	// unpublished head this run produced; a timestamp means an explicit
 	// guarded recovery ended that ownership (internal/branchsync).
 	`ALTER TABLE runs ADD COLUMN custody_returned_at INTEGER`,
+	// The run's skip set, comma-joined in canonical pipeline order. NULL and the
+	// empty string are deliberately different: NULL means the run predates this
+	// column and its plan is unrecoverable, while '' means the run explicitly
+	// skips nothing and will therefore reach push, pr and ci. Readers that
+	// collapse the two either warn that a contained run will push or promise
+	// that an unknown run stays local.
+	`ALTER TABLE runs ADD COLUMN skipped_steps TEXT`,
 	`ALTER TABLE step_results ADD COLUMN last_activity_at INTEGER`,
 	`ALTER TABLE step_results ADD COLUMN last_activity TEXT`,
 	`ALTER TABLE step_results ADD COLUMN agent_pid INTEGER`,

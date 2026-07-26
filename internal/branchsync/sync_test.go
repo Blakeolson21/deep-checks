@@ -63,7 +63,7 @@ func newSyncFixture(t *testing.T) *syncFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := database.InsertRun(repo.ID, "feature/sync", old, base)
+	run, err := database.InsertRun(repo.ID, "feature/sync", old, base, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func rebuildPipelineHead(t *testing.T, f *syncFixture, commits []pipelineCommit)
 
 func replaceSyncRun(t *testing.T, f *syncFixture) {
 	t.Helper()
-	run, err := f.db.InsertRun(f.repo.ID, "feature/sync", f.old, f.base)
+	run, err := f.db.InsertRun(f.repo.ID, "feature/sync", f.old, f.base, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestTargetIdentityNeverPersistsOrDisplaysHTTPUserinfo(t *testing.T) {
 
 func TestInspectCachedPrePushAndPushInProgressAreNonSyncable(t *testing.T) {
 	f := newSyncFixture(t)
-	active, err := f.db.InsertRun(f.repo.ID, "feature/sync", f.old, f.base)
+	active, err := f.db.InsertRun(f.repo.ID, "feature/sync", f.old, f.base, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -689,7 +689,7 @@ func TestTargetChangeLegacyDetachedAndGenerationRaceRefuse(t *testing.T) {
 	})
 	t.Run("legacy", func(t *testing.T) {
 		f := newSyncFixture(t)
-		legacy, err := f.db.InsertRun(f.repo.ID, "feature/sync", f.old, f.base)
+		legacy, err := f.db.InsertRun(f.repo.ID, "feature/sync", f.old, f.base, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

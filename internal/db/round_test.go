@@ -9,7 +9,7 @@ import (
 func TestStepRoundInsertAndGet(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepReview)
 
 	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"unused var"}],"summary":"1 issue"}`
@@ -52,7 +52,7 @@ func TestStepRoundInsertAndGet(t *testing.T) {
 func TestStepRoundNullFindings(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepTest)
 
 	r, err := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 500)
@@ -67,7 +67,7 @@ func TestStepRoundNullFindings(t *testing.T) {
 func TestGetRoundsByStep(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepLint)
 
 	findings1 := `{"findings":[{"id":"lint-1","severity":"error","description":"missing check"}],"summary":"1 error"}`
@@ -111,7 +111,7 @@ func TestGetRoundsByStep(t *testing.T) {
 func TestGetRoundsByStepEmpty(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepPush)
 
 	rounds, err := d.GetRoundsByStep(step.ID)
@@ -126,7 +126,7 @@ func TestGetRoundsByStepEmpty(t *testing.T) {
 func TestStepFixSummaries(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepReview)
 
 	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"x"}],"summary":"1"}`
@@ -156,7 +156,7 @@ func TestStepFixSummaries(t *testing.T) {
 func TestStepRoundStats(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepLint)
 
 	findings := `{"findings":[{"id":"lint-1","action":"auto-fix","description":"missing check"}]}`
@@ -189,7 +189,7 @@ func TestStepRoundStats(t *testing.T) {
 func TestStepFixSummariesNoFixRounds(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepLint)
 	d.InsertStepRound(step.ID, 1, "initial", nil, nil, 100)
 
@@ -205,7 +205,7 @@ func TestStepFixSummariesNoFixRounds(t *testing.T) {
 func TestStepRoundCascadeDelete(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepReview)
 	d.InsertStepRound(step.ID, 1, "initial", nil, nil, 100)
 
@@ -224,7 +224,7 @@ func TestStepRoundCascadeDelete(t *testing.T) {
 func TestSetStepRoundSelectedFindingIDs(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def", nil)
 	step, _ := d.InsertStepResult(run.ID, types.StepReview)
 
 	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"x"},{"id":"review-2","severity":"error","description":"y"}],"summary":"2"}`

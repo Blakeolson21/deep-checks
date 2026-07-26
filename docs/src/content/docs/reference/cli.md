@@ -158,6 +158,11 @@ no-mistakes axi status --run <id>
 
 When the resolved run is parked at an `awaiting_approval` or `fix_review` gate, its top-level `run:` object includes `awaiting_agent: parked <duration>` immediately after `status`.
 The field disappears after `axi respond`, on cancel, and on terminal outcomes; use it to distinguish a run waiting for the driving agent from one actively running, fixing, or watching CI.
+
+The run object also reports `skipped_steps`, the steps this run will never execute, or `none` when it skips nothing.
+Read it to know in advance whether finishing the run pushes the branch and opens a PR, or ends on this machine: a step the run will skip still reads `pending` in the `steps` table until the run reaches it, so per-step status cannot answer that.
+Runs created before the pipeline recorded the skip set omit the field, which means unknown rather than nothing skipped.
+The recorded set also survives a daemon restart, so a resumed run skips exactly what it was started with.
 When the resolved run has a `running` or `fixing` step, the run object includes `active_steps`.
 Each row reports how long the step has been active, the latest meaningful log or native-agent lifecycle activity, the native agent PID if one is currently running, and the current round such as `round 1`, `auto-fix 1/3`, or `fix 2`.
 If no activity arrives for longer than `step_quiet_warning`, `last_activity` is prefixed with `quiet`; this is only a liveness signal and does not cancel the step.

@@ -103,7 +103,7 @@ func newIntentIntegrationContext(t *testing.T, repoDir, base, head string, cfg *
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := d.InsertRun(repo.ID, "feature", head, base)
+	run, err := d.InsertRun(repo.ID, "feature", head, base, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
