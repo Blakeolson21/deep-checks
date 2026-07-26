@@ -626,3 +626,73 @@ func TestPrepareRecoveredRunRefusesAnUnreadableSkipSet(t *testing.T) {
 		t.Errorf("error = %v, want it to name the unreadable step", err)
 	}
 }
+
+// Configuring the executor and recording the plan are two different things, and
+// only the recorded plan survives a restart or reaches a reader. A run that
+// skips push must say so in its own row, not merely behave that way in the
+// executor that happens to be running it.
+func TestPushReceivedRecordsTheSkipSetOnTheRun(t *testing.T) {
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{&mockPassStep{name: types.StepReview}, &mockPassStep{name: types.StepPush}}
+	})
+	_, headSHA := setupTestGitRepo(t, p, d, "record-skip-set-repo")
+
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var result ipc.PushReceivedResult
+	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+		Gate:      p.RepoDir("record-skip-set-repo"),
+		Ref:       "refs/heads/main",
+		Old:       "0000000000000000000000000000000000000000",
+		New:       headSHA,
+		SkipSteps: []types.StepName{types.StepPush},
+	}, &result); err != nil {
+		t.Fatal(err)
+	}
+	run := waitForRunTerminalState(t, d, result.RunID)
+
+	if run.SkippedSteps == nil {
+		t.Fatal("run recorded no skip set; a reader cannot tell this run from one that will push")
+	}
+	if *run.SkippedSteps != "push" {
+		t.Errorf("skipped_steps = %q, want %q", *run.SkippedSteps, "push")
+	}
+}
+
+// The counterpart: a run started with no --skip records an explicitly empty
+// plan, which is what lets a reader say it will reach push rather than that
+// its plan is unknown.
+func TestPushReceivedRecordsAnEmptySkipSetWhenNothingIsSkipped(t *testing.T) {
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
+	})
+	_, headSHA := setupTestGitRepo(t, p, d, "record-empty-skip-set-repo")
+
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var result ipc.PushReceivedResult
+	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+		Gate: p.RepoDir("record-empty-skip-set-repo"),
+		Ref:  "refs/heads/main",
+		Old:  "0000000000000000000000000000000000000000",
+		New:  headSHA,
+	}, &result); err != nil {
+		t.Fatal(err)
+	}
+	run := waitForRunTerminalState(t, d, result.RunID)
+
+	if run.SkippedSteps == nil {
+		t.Fatal("a run that skips nothing recorded NULL, which reads as an unknown plan")
+	}
+	if *run.SkippedSteps != "" {
+		t.Errorf("skipped_steps = %q, want empty", *run.SkippedSteps)
+	}
+}
