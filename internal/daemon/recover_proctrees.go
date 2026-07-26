@@ -25,8 +25,9 @@ var reapProcTreeRecordFunc = proctree.ReapRecord
 //   - If another daemon is alive, skip everything. The daemon is machine-wide,
 //     so its running steps own live process trees that must not be killed.
 //   - ReapRecord itself refuses to touch a tree whose leader is still alive with
-//     a matching start time, and verifies each descendant's start time before
-//     signalling, so a recycled pid is never the victim.
+//     a matching start time, verifies each descendant before a per-pid kill, and
+//     verifies each sampled group leader before a group kill. Unsampled or
+//     recycled group leaders fail closed.
 func reapOrphanedProcessTrees(p *paths.Paths) {
 	dir := p.ProcTreesDir()
 	if otherDaemonAlive(p) {

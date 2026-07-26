@@ -19,9 +19,11 @@ import (
 // the moment its parent exits and the kernel rewrites its ppid to 1. The record
 // is the only thing that can still name them afterwards.
 //
-// LeaderStart is what makes the record safe to act on later. Pids are recycled,
-// so a bare pid list read minutes or days after the fact would be a licence to
-// kill strangers.
+// The recorded start times are what make the record safe to act on later.
+// LeaderStart protects the whole-tree ownership decision, while each
+// descendant's start time protects both its per-pid kill and any group kill it
+// leads. Pids are recycled, so bare pid or pgid lists read minutes or days after
+// the fact would be a licence to kill strangers.
 type Record struct {
 	LeaderPID   int       `json:"leader_pid"`
 	LeaderStart time.Time `json:"leader_started_at"`

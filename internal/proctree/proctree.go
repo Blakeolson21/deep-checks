@@ -8,9 +8,9 @@
 // ppid links, not signalling a group.
 //
 // The package knows nothing about runs, steps, or configuration. It is
-// deliberately small so its blast radius is auditable: every kill is guarded by
-// a freshly re-read start time, and pid 1, the current process, and the current
-// process's ancestors are never signalled.
+// deliberately small so its blast radius is auditable: every per-pid kill and
+// group kill is guarded by a freshly re-read start time. Per-pid kills also
+// refuse pid 1, the current process, and the current process's ancestors.
 package proctree
 
 import (

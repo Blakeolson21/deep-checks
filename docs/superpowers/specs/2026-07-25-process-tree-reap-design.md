@@ -53,6 +53,7 @@ about runs, steps, or config.
 Snapshot() ([]Proc, error)
 Descendants(snap []Proc, leaderPID int) []Proc
 Kill(procs []Proc)
+KillGroups(groups []int, recorded []Proc)
 ```
 
 `Snapshot` shells out to `ps -Ao pid=,ppid=,pgid=,lstart=`. Shelling out is
@@ -72,14 +73,21 @@ signal a pid can be recycled, and killing a recycled pid is exactly the failure 
 this change exists to avoid. It hard-refuses pid <= 1, the current pid, and the current
 process's ancestors.
 
-That re-read is a targeted `ps -p <pids>`, not a full listing. During implementation a
-full `ps -A` on the reap path regressed
+`KillGroups` applies the same identity rule to the higher-blast-radius group kill. It
+re-reads each sampled group leader's start time before signalling the group. A group
+whose leader was not sampled, has exited, or has been replaced by a recycled pid fails
+closed; the start-time-guarded per-pid `Kill` still covers sampled members. The
+unguarded group-kill primitive is package-private, so live teardown and startup
+recovery share the guarded API.
+
+These re-reads use targeted `ps -p <pids>` lookups, not a full listing. During
+implementation a full `ps -A` on the reap path regressed
 `TestDefaultShellCommandOutput_TimesOut` from milliseconds to 592ms, because the reap
 runs on every command teardown including short git subprocesses, and a listing of the
 ~1000 processes on the box costs tens of milliseconds (hundreds under `-race`). Paying
 that per command would have been a self-inflicted version of the slowdown this change
-exists to fix. With nothing to kill - the overwhelmingly common case - `Kill` now costs
-nothing at all.
+exists to fix. With nothing to kill, which is the overwhelmingly common case, the kill
+helpers cost nothing at all.
 
 The protected-pid set needs a full listing to walk ancestry, so it is computed once per
 process and cached rather than per reap.
@@ -116,10 +124,13 @@ leaders are registered, and attributes descendants to each. Default tick is 15s.
 
 Each tick records, per leader, the descendant pids with their start times **and every
 distinct pgid observed**. Reap uses both: the pid union catches anything a poll saw,
-and killing each observed pgid catches processes spawned after the last poll by a
-still-living tracked ancestor. A `setsid()` child gets its own pgid, so it enters the
-pgid set the first time it is sampled and its own later children are covered as a
-group.
+and killing each verified observed pgid catches processes spawned after the last poll
+by a still-living tracked ancestor. Before a group kill, the reaper confirms that the
+sampled group leader still has the same start time. A `setsid()` child gets its own
+pgid, so it enters the pgid set and descendant union the first time it is sampled; its
+own later children are covered as a group. If the group leader was never sampled or
+its pid was recycled, the group kill is skipped and the recorded members are still
+handled individually.
 
 Residual gap: a process that both spawns and loses its parent within a single tick
 window is still missed. Nothing short of ptrace or a PID namespace closes that. The
@@ -139,8 +150,8 @@ nothing in this branch needs them. Branch 3's worktree-removal guard does, and w
 them at a layer that knows.
 
 `recoverOnStartup` sweeps that directory alongside the existing `reapOrphanedServers`,
-reusing the start-time-match guard and the `otherDaemonAlive` skip so a second daemon
-never reaps a live daemon's trees.
+reusing the per-pid and group-leader start-time guards and the `otherDaemonAlive` skip
+so a second daemon never reaps a live daemon's trees.
 
 ## Testing
 
