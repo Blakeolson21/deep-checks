@@ -144,6 +144,59 @@ func TestReapRecord_KillsSurvivingDescendantsWhoseStartTimesMatch(t *testing.T) 
 	}
 }
 
+// TestReapRecord_KillsVerifiedGroup confirms a recorded group is killed when its
+// leader pid is still the same process the record captured.
+func TestReapRecord_KillsVerifiedGroup(t *testing.T) {
+	started := time.Date(2026, time.July, 21, 18, 0, 0, 0, time.UTC)
+	rec := Record{
+		LeaderPID:   4242,
+		LeaderStart: started,
+		Descendants: []Proc{{PID: 4243, PPID: 1, PGID: 4243, Started: started}},
+		Groups:      []int{4243},
+	}
+
+	var signalled []int
+	defer swapRecordReapForTest(
+		[]Proc{{PID: 4243, PPID: 1, PGID: 4243, Started: started}},
+		map[int]time.Time{4243: started},
+		func(pid int, sig syscall.Signal) error { signalled = append(signalled, pid); return nil },
+	)()
+
+	ReapRecord(rec)
+
+	// -4243 is the group kill; 4243 is the per-pid descendant kill.
+	if len(signalled) != 2 || signalled[0] != -4243 || signalled[1] != 4243 {
+		t.Fatalf("ReapRecord signalled %v, want [-4243 4243]", signalled)
+	}
+}
+
+// TestReapRecord_SkipsGroupWhenLeaderPIDWasRecycled is the group-kill analogue of
+// the leader-recycle guard: a records-are-days-old pgid whose leader pid now
+// belongs to an unrelated process must not have its whole group SIGKILLed.
+func TestReapRecord_SkipsGroupWhenLeaderPIDWasRecycled(t *testing.T) {
+	recorded := time.Date(2026, time.July, 21, 18, 30, 0, 0, time.UTC)
+	rec := Record{
+		LeaderPID:   4242,
+		LeaderStart: recorded,
+		Descendants: []Proc{{PID: 4243, PPID: 1, PGID: 4243, Started: recorded}},
+		Groups:      []int{4243},
+	}
+
+	var signalled []int
+	defer swapRecordReapForTest(
+		// The group leader pid exists again, but as a different process.
+		[]Proc{{PID: 4243, PPID: 1, PGID: 4243, Started: recorded.Add(time.Hour)}},
+		map[int]time.Time{4243: recorded.Add(time.Hour)},
+		func(pid int, sig syscall.Signal) error { signalled = append(signalled, pid); return nil },
+	)()
+
+	ReapRecord(rec)
+
+	if len(signalled) != 0 {
+		t.Fatalf("ReapRecord signalled %v after group-leader pid reuse, want none", signalled)
+	}
+}
+
 // swapRecordReapForTest stubs both seams ReapRecord uses: the full listing that
 // decides whether the leader is still alive, and the targeted start-time lookup
 // Kill verifies descendants with.
