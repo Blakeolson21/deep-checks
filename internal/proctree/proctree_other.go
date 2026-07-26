@@ -20,5 +20,5 @@ func startTimes([]int) (map[int]time.Time, error) { return nil, errUnsupported }
 
 func killProcess(int, syscall.Signal) error { return errUnsupported }
 
-// KillGroup is a no-op outside unix.
-func KillGroup(int) {}
+// killGroup is a no-op outside unix.
+func killGroup(int) {}

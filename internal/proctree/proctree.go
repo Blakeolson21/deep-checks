@@ -193,6 +193,54 @@ func Kill(procs []Proc) {
 	}
 }
 
+// KillGroups SIGKILLs each group whose leader pid is still the same process that
+// sampling recorded.
+//
+// A group kill is the highest-blast-radius operation here: a stale pgid does not
+// signal one wrong process, it signals every member of whatever group that pid
+// now leads. Pids are recycled, and the gap between sampling and reaping can be
+// long - a step in the motivating incident ran 86 minutes, and a persisted
+// record can be days old - so an unverified pgid is a licence to SIGKILL an
+// unrelated group.
+//
+// The leader's sampled start time comes from recorded, which works because a
+// setsid() escapee leads its own group and is therefore always sampled into the
+// descendant union alongside it. A group with no recorded leader fails closed
+// and is skipped; the start-time-guarded per-pid Kill still covers its members.
+func KillGroups(groups []int, recorded []Proc) {
+	if len(groups) == 0 {
+		return
+	}
+	sampledStart := make(map[int]time.Time, len(recorded))
+	for _, p := range recorded {
+		sampledStart[p.PID] = p.Started
+	}
+
+	verify := make([]int, 0, len(groups))
+	for _, pgid := range groups {
+		if _, ok := sampledStart[pgid]; ok {
+			verify = append(verify, pgid)
+		}
+	}
+	if len(verify) == 0 {
+		return
+	}
+	actual, err := startTimesFunc(verify)
+	if err != nil {
+		return
+	}
+	for _, pgid := range verify {
+		now, ok := actual[pgid]
+		if !ok {
+			continue // group leader already gone
+		}
+		if !sameProcess(sampledStart[pgid], now) {
+			continue // pid recycled onto an unrelated group leader
+		}
+		killGroup(pgid)
+	}
+}
+
 var (
 	protectedOnce sync.Once
 	protectedSet  map[int]bool
