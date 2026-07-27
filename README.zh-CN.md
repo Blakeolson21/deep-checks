@@ -1,29 +1,20 @@
 <h1 align="center"><code>git push no-mistakes</code></h1>
 <p align="center">
-  <a href="https://github.com/kunchenguid/no-mistakes/actions/workflows/release.yml"
+  <a href="https://github.com/Blakeolson21/deep-checks/actions/workflows/release.yml"
     ><img
       alt="Release"
-      src="https://img.shields.io/github/actions/workflow/status/kunchenguid/no-mistakes/release.yml?style=flat-square&label=release"
+      src="https://img.shields.io/github/actions/workflow/status/Blakeolson21/deep-checks/release.yml?style=flat-square&label=release"
   /></a>
   <a href="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue?style=flat-square"
     ><img
       alt="Platform"
       src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue?style=flat-square"
   /></a>
-  <a href="https://x.com/kunchenguid"
+  <a href="https://github.com/Blakeolson21/deep-checks/blob/main/LICENSE"
     ><img
-      alt="X"
-      src="https://img.shields.io/badge/X-@kunchenguid-black?style=flat-square"
+      alt="License"
+      src="https://img.shields.io/badge/license-MIT-green?style=flat-square"
   /></a>
-  <a href="https://discord.gg/Wsy2NpnZDu"
-    ><img
-      alt="Discord"
-      src="https://img.shields.io/discord/1439901831038763092?style=flat-square&label=discord"
-  /></a>
-</p>
-
-<p align="center">
-  <a href="https://trendshift.io/repositories/27829?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-27829" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/27829" alt="kunchenguid%2Fno-mistakes | Trendshift" width="250" height="55"/></a>
 </p>
 
 <h3 align="center">干掉所有 slop，开出干净的 PR。</h3>
@@ -31,7 +22,7 @@
 <p align="center"><a href="README.md">English</a> · <strong>简体中文</strong></p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/demo.gif" alt="no-mistakes demo" width="800" />
+  <img src="https://raw.githubusercontent.com/Blakeolson21/deep-checks/main/demo.gif" alt="no-mistakes demo" width="800" />
 </p>
 
 `no-mistakes` 在你真实的远端前面放了一个本地 git 代理。
@@ -136,12 +127,6 @@ make docs    # 在 docs/dist 构建 Astro 文档站
 
 `make e2e-record` 会用真实的 `claude`、`codex`、`opencode` CLI 覆盖 `internal/e2e/fixtures/`，会消耗真实 API 额度，提交前应当审查。
 
-## Star 历史
+## 致谢
 
-<a href="https://www.star-history.com/?repos=kunchenguid%2Fno-mistakes&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=kunchenguid/no-mistakes&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=kunchenguid/no-mistakes&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=kunchenguid/no-mistakes&type=date&legend=top-left" />
- </picture>
-</a>
+源自 [kunchenguid/no-mistakes](https://github.com/kunchenguid/no-mistakes)（作者 Kun Chen），依据 MIT 许可证使用。
