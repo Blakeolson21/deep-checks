@@ -85,6 +85,26 @@ func intentConformanceReviewClause(sctx *pipeline.StepContext) string {
 	return "\n\nIntent conformance (required): the User intent above is authoritative acceptance criteria, not a hint. If the change contradicts it - it removes or omits a source-verifiable behavior the criteria mark as REQUIRED, or adds a behavior they mark as FORBIDDEN - you MUST emit an \"ask-user\" finding that quotes the specific criterion and the contradicting diff hunk (or, for a removed required behavior, notes what the criteria require that is now absent from the change), even if the change is otherwise risk-clean. Do not resolve such a contradiction yourself and do not classify it \"auto-fix\". Do not treat deferred pipeline-owned delivery outcomes (remote branch not yet pushed, pull request not yet opened or updated, CI not yet observed for this run) as contradictions at this phase; later pipeline steps own those."
 }
 
+// intentSupersessionClause returns a directive for steps that run AFTER review
+// and edit file content (currently document). Review owns intent conformance:
+// it is the only step given intentConformanceReviewClause, and it re-reviews
+// after every fix round. A later step therefore sees a tree in which review may
+// have deliberately overridden the intent - four ask-user rounds settling on a
+// conclusion the original --intent contradicted - with nothing in its prompt
+// marking that content as adjudicated.
+//
+// Without this clause the document step reads the authoritative intent framing
+// as licence to "align" the tree back to the stale criteria, and its own scope
+// discipline ("plus direct contradictions that analysis reveals") invites
+// exactly that edit. The clause removes the authority to resolve, not the
+// context: the step still knows the goal, it just may not litigate it.
+func intentSupersessionClause(sctx *pipeline.StepContext) string {
+	if cleanedUserIntent(sctx) == "" {
+		return ""
+	}
+	return "\n\nIntent is context here, not authority to rewrite (required): the user intent above describes what the author set out to do. It was written BEFORE this run and may have been superseded by the review step, which owns intent conformance and may have deliberately settled on a conclusion the intent contradicts. Committed content produced by earlier pipeline steps records decisions this run already adjudicated. You MUST NOT delete, revert, weaken, or reword committed content in order to make it agree with the user intent, and you must not treat such a disagreement as staleness to fix. If the tree contradicts the intent, leave the tree alone and report one \"ask-user\" finding that quotes the intent criterion and the contradicting content. Fix only documentation this change genuinely made inaccurate."
+}
+
 // cleanedUserIntent returns the trimmed, secret-redacted, adversarial-stripped
 // user intent text suitable for embedding either into agent prompts or into
 // rendered surfaces like a PR body. Returns "" when no intent is available.
