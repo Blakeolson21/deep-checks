@@ -123,6 +123,10 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		sctx.Log("updating documentation...")
 	}
 
+	// Recorded before the agent runs so the reversal guard below can separate
+	// what earlier pipeline steps established from what this pass produced.
+	preDocumentHead := sctx.Run.HeadSHA
+
 	prompt := s.buildPrompt(sctx, baseSHA, ignorePatterns, combinedLint)
 	schema := findingsSchema
 	purpose := "document"
@@ -150,6 +154,17 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		fallbackSummary = "update documentation and fix lint"
 	}
 	if err := commitAgentFixes(sctx, s.Name(), commitSummary, fallbackSummary); err != nil {
+		return nil, err
+	}
+
+	// commitAgentFixes advanced Run.HeadSHA to this pass's commit. Nothing
+	// re-reviews that commit, so verify here that it did not reverse a
+	// decision the review step settled; see document_guard.go.
+	submittedHead := ""
+	if sctx.Run.SubmittedHeadSHA != nil {
+		submittedHead = *sctx.Run.SubmittedHeadSHA
+	}
+	if err := assertDocumentPreservedPipelineContent(sctx, submittedHead, preDocumentHead, sctx.Run.HeadSHA); err != nil {
 		return nil, err
 	}
 
