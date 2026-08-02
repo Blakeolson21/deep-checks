@@ -1,43 +1,44 @@
 package cli
 
 import (
-	"strings"
+	"errors"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/update"
 )
 
-func TestUpdateCommandDevBuild(t *testing.T) {
-	isolateUpdateCommand(t)
-
-	out, err := executeCmd("update")
-	if err != nil {
-		t.Fatalf("update failed: %v\noutput: %s", err, out)
+// Self-update is disabled in this fork build: an update would overwrite the
+// running binary with an upstream release carrying none of the local
+// document-guard patches. These cases previously asserted the
+// "self-update unavailable for development builds" message, which only appeared
+// because buildinfo.Version is "dev" under `go test`. That made them silent
+// about the real behavior, so a release build could have updated freely while
+// they stayed green. The property worth pinning is that no flag combination
+// reaches the update path.
+func TestUpdateCommandRefusesRegardlessOfFlags(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"bare", []string{"update"}},
+		{"beta", []string{"update", "--beta"}},
+		{"yes", []string{"update", "-y"}},
+		{"force", []string{"update", "--force"}},
+		{"yes and force", []string{"update", "-y", "--force"}},
 	}
-	if !strings.Contains(out, "self-update unavailable for development builds") {
-		t.Fatalf("unexpected update output: %s", out)
-	}
-}
 
-func TestUpdateCommandBetaFlag(t *testing.T) {
-	isolateUpdateCommand(t)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateUpdateCommand(t)
 
-	out, err := executeCmd("update", "--beta")
-	if err != nil {
-		t.Fatalf("update --beta failed: %v\noutput: %s", err, out)
-	}
-	if !strings.Contains(out, "self-update unavailable for development builds") {
-		t.Fatalf("unexpected update output: %s", out)
-	}
-}
-
-func TestUpdateCommandYesFlag(t *testing.T) {
-	isolateUpdateCommand(t)
-
-	out, err := executeCmd("update", "-y")
-	if err != nil {
-		t.Fatalf("update -y failed: %v\noutput: %s", err, out)
-	}
-	if !strings.Contains(out, "self-update unavailable for development builds") {
-		t.Fatalf("unexpected update output: %s", out)
+			out, err := executeCmd(tc.args...)
+			if err == nil {
+				t.Fatalf("%v should refuse, got success\noutput: %s", tc.args, out)
+			}
+			if !errors.Is(err, update.ErrSelfUpdateDisabled) {
+				t.Fatalf("%v error = %v, want ErrSelfUpdateDisabled\noutput: %s", tc.args, err, out)
+			}
+		})
 	}
 }
 

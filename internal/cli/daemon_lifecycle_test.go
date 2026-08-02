@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/update"
 )
 
 func TestDaemonStopRefusesWithActiveRunsAndListsThem(t *testing.T) {
@@ -126,9 +128,18 @@ func TestLifecycleCommandsWriteCallerAttributionToCLILog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("daemon restart --force failed: %v\n%s", err, out)
 	}
+	// Self-update is disabled in this fork build, so `update` refuses. Caller
+	// attribution is logged before the command body runs, so the refusal is the
+	// stronger case to assert here: it proves the lifecycle audit trail survives
+	// a command that fails. Previously this passed only because isDevVersion
+	// made `update` a silent no-op under `go test`, so it never exercised the
+	// real path either way.
 	out, err = executeCmd("update", "--force")
-	if err != nil {
-		t.Fatalf("update --force failed: %v\n%s", err, out)
+	if err == nil {
+		t.Fatalf("update --force should refuse while self-update is disabled\n%s", out)
+	}
+	if !errors.Is(err, update.ErrSelfUpdateDisabled) {
+		t.Fatalf("update --force error = %v, want ErrSelfUpdateDisabled\n%s", err, out)
 	}
 
 	data, err := os.ReadFile(filepath.Join(nmHome, "logs", "cli.log"))
