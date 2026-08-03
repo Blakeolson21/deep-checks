@@ -128,6 +128,10 @@ func TestLifecycleCommandsWriteCallerAttributionToCLILog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("daemon restart --force failed: %v\n%s", err, out)
 	}
+	out, err = executeCmd("daemon", "stop", "--abandon-executing-runs")
+	if err != nil {
+		t.Fatalf("daemon stop --abandon-executing-runs failed: %v\n%s", err, out)
+	}
 	// Self-update is disabled in this fork build, so `update` refuses. Caller
 	// attribution is logged before the command body runs, so the refusal is the
 	// stronger case to assert here: it proves the lifecycle audit trail survives
@@ -159,6 +163,14 @@ func TestLifecycleCommandsWriteCallerAttributionToCLILog(t *testing.T) {
 		if !strings.Contains(log, want) {
 			t.Fatalf("cli.log should contain %q, got %q", want, log)
 		}
+	}
+	// The two flags authorize different destruction, so the forensic trail has
+	// to distinguish them: --force alone is not --abandon-executing-runs.
+	if !strings.Contains(log, "command=daemon.stop force=true abandon_executing=false") {
+		t.Fatalf("cli.log should record --force without --abandon-executing-runs, got %q", log)
+	}
+	if !strings.Contains(log, "command=daemon.stop force=false abandon_executing=true") {
+		t.Fatalf("cli.log should record --abandon-executing-runs distinctly, got %q", log)
 	}
 }
 
@@ -306,6 +318,107 @@ func TestDaemonStopForceAllowsLeftoverRunsWhenDaemonIsDown(t *testing.T) {
 	}
 }
 
+// A pending row is not a queued run. It is the window inside startRun where
+// the daemon is building the worktree and fetching the trusted default branch,
+// and a restart fails it rather than resuming it, so a live daemon holding one
+// is driving it right now.
+func TestDaemonStopForceRefusesPendingRunUnderLiveDaemon(t *testing.T) {
+	nmHome := t.TempDir()
+	t.Setenv("NM_HOME", nmHome)
+	seedPendingLifecycleRun(t, paths.WithRoot(nmHome), "feature-starting")
+	stubDaemonAlive(t)
+	stopCalled := stubDaemonStop(t)
+
+	out, err := executeCmd("daemon", "stop", "--force")
+	if err == nil {
+		t.Fatal("daemon stop --force should refuse a pending run a live daemon is starting")
+	}
+	if *stopCalled {
+		t.Fatal("daemon stop --force should not stop the daemon while a run is starting")
+	}
+	if !strings.Contains(out+err.Error(), "executing a step") || !strings.Contains(out+err.Error(), "feature-starting") {
+		t.Fatalf("pending-run refusal should name the run, got output %q error %v", out, err)
+	}
+}
+
+// `daemon start` with a daemon already running refreshes a drifted managed
+// service definition by stopping and restarting it, which kills an executing
+// step exactly like an unguarded `daemon stop`.
+func TestDaemonStartRefusesRunExecutingAStep(t *testing.T) {
+	nmHome := t.TempDir()
+	t.Setenv("NM_HOME", nmHome)
+	seedLifecycleRunAtStep(t, paths.WithRoot(nmHome), "feature-executing", types.StepTest, types.StepStatusRunning)
+	stubDaemonAlive(t)
+	startCalled := stubDaemonStart(t)
+
+	out, err := executeCmd("daemon", "start")
+	if err == nil {
+		t.Fatal("daemon start should refuse while a run is executing a step")
+	}
+	if *startCalled {
+		t.Fatal("daemon start should not touch the daemon after refusing")
+	}
+	for _, want := range []string{
+		"refusing daemon start",
+		"executing a step",
+		"feature-executing",
+		"step=test",
+		"--abandon-executing-runs",
+	} {
+		if !strings.Contains(out+err.Error(), want) {
+			t.Fatalf("daemon start refusal should contain %q, got output %q error %v", want, out, err)
+		}
+	}
+
+	out, err = executeCmd("daemon", "start", "--abandon-executing-runs")
+	if err != nil {
+		t.Fatalf("daemon start --abandon-executing-runs should proceed, got %v (output %q)", err, out)
+	}
+	if !*startCalled {
+		t.Fatal("daemon start --abandon-executing-runs should start the daemon")
+	}
+}
+
+// Starting the daemon is how an operator recovers from a dead or wedged one,
+// so leftover rows must never refuse it: the service-refresh path that could
+// destroy work is reachable only when the daemon answers healthy.
+func TestDaemonStartProceedsWhenNoHealthyDaemonOwnsTheLeftoverRuns(t *testing.T) {
+	for name, probe := range map[string]func(*paths.Paths) (bool, error){
+		"daemon down":         func(*paths.Paths) (bool, error) { return false, nil },
+		"health probe failed": func(*paths.Paths) (bool, error) { return false, errors.New("dead socket") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			nmHome := t.TempDir()
+			t.Setenv("NM_HOME", nmHome)
+			seedLifecycleRunAtStep(t, paths.WithRoot(nmHome), "feature-stale", types.StepTest, types.StepStatusRunning)
+			prev := daemonIsRunningFn
+			daemonIsRunningFn = probe
+			t.Cleanup(func() { daemonIsRunningFn = prev })
+			startCalled := stubDaemonStart(t)
+
+			out, err := executeCmd("daemon", "start")
+			if err != nil {
+				t.Fatalf("daemon start should proceed, got %v (output %q)", err, out)
+			}
+			if !*startCalled {
+				t.Fatal("daemon start should start the daemon")
+			}
+		})
+	}
+}
+
+func stubDaemonStart(t *testing.T) *bool {
+	t.Helper()
+	called := false
+	prev := daemonStartFn
+	daemonStartFn = func(*paths.Paths) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() { daemonStartFn = prev })
+	return &called
+}
+
 func stubDaemonAlive(t *testing.T) {
 	t.Helper()
 	prev := daemonIsRunningFn
@@ -323,6 +436,31 @@ func stubDaemonStop(t *testing.T) *bool {
 	}
 	t.Cleanup(func() { daemonStopFn = prev })
 	return &called
+}
+
+// seedPendingLifecycleRun inserts one run left in the pending window, before
+// any step row exists.
+func seedPendingLifecycleRun(t *testing.T, p *paths.Paths, branch string) {
+	t.Helper()
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+	repo, err := database.InsertRepo("/tmp/project", "git@github.com:user/project.git", "main")
+	if err != nil {
+		t.Fatalf("insert repo: %v", err)
+	}
+	run, err := database.InsertRun(repo.ID, branch, "ddd444", "000")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if run.Status != types.RunPending {
+		t.Fatalf("seeded run status = %s, want %s", run.Status, types.RunPending)
+	}
 }
 
 // seedLifecycleRunAtStep inserts one running run whose step is left in status,

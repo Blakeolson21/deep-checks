@@ -12,23 +12,40 @@ import (
 
 // ActiveRuns returns all pending/running pipeline runs from the local state DB.
 func ActiveRuns(p *paths.Paths) ([]*db.Run, error) {
+	var runs []*db.Run
+	err := withStateDB(p, func(database *db.DB) error {
+		var err error
+		runs, err = database.GetActiveRuns()
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return runs, nil
+}
+
+// withStateDB opens the state DB once and hands it to fn. A missing database
+// is not an error: no database means no runs. db.Open runs schema migrations,
+// so callers that need several queries must share one open handle rather than
+// paying that cost per query.
+func withStateDB(p *paths.Paths, fn func(*db.DB) error) error {
 	if p == nil {
-		return nil, nil
+		return nil
 	}
 	dbPath := p.DB()
 	if _, err := os.Stat(dbPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
+			return nil
 		}
-		return nil, fmt.Errorf("stat database: %w", err)
+		return fmt.Errorf("stat database: %w", err)
 	}
 
 	database, err := db.Open(dbPath)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer database.Close()
-	return database.GetActiveRuns()
+	return fn(database)
 }
 
 func RunList(runs []*db.Run) string {
@@ -61,8 +78,9 @@ const (
 	ActivityExecuting Activity = "executing"
 	// ActivityParked means the run is blocked at a gate awaiting the agent.
 	ActivityParked Activity = "parked"
-	// ActivityIdle means no daemon is driving the run: it is queued behind
-	// another run, or a row left over from a daemon that is no longer running.
+	// ActivityIdle means no daemon is driving the run: it is a row left over
+	// from a daemon that is no longer running. There is no run queue, so a
+	// live daemon never has an idle run.
 	ActivityIdle Activity = "idle"
 )
 
@@ -78,47 +96,57 @@ type ActiveRun struct {
 // ClassifyActiveRuns returns every pending/running run in the local state DB
 // annotated with its Activity. daemonRunning reports whether a daemon is
 // serving this NM_HOME; when no daemon is, nothing can be mid-step, because
-// startup recovery is what reconciles the rows a dead daemon left behind.
+// startup recovery is what reconciles the rows a dead daemon left behind. It
+// is consulted only once at least one active run exists, so the common
+// no-active-runs path never pays for a daemon health probe, and a nil
+// daemonRunning fails closed to "a daemon is serving this root".
 //
 // Classification is deliberately asymmetric: a run is reported as parked or
 // idle only on positive evidence, and anything else a live daemon still owns
 // counts as executing. A run between two steps has neither a running step nor
 // a gate marker, and guessing "safe" there is what a destructive lifecycle
 // command must never do.
-func ClassifyActiveRuns(p *paths.Paths, daemonRunning bool) ([]ActiveRun, error) {
-	runs, err := ActiveRuns(p)
-	if err != nil || len(runs) == 0 {
-		return nil, err
-	}
-
-	classified := make([]ActiveRun, 0, len(runs))
-	if !daemonRunning {
-		for _, run := range runs {
-			classified = append(classified, ActiveRun{Run: run, Activity: ActivityIdle})
+func ClassifyActiveRuns(p *paths.Paths, daemonRunning func() bool) ([]ActiveRun, error) {
+	var classified []ActiveRun
+	err := withStateDB(p, func(database *db.DB) error {
+		runs, err := database.GetActiveRuns()
+		if err != nil {
+			return err
 		}
-		return classified, nil
-	}
-
-	database, err := db.Open(p.DB())
+		if len(runs) == 0 {
+			return nil
+		}
+		alive := true
+		if daemonRunning != nil {
+			alive = daemonRunning()
+		}
+		classified = make([]ActiveRun, 0, len(runs))
+		for _, run := range runs {
+			if !alive {
+				classified = append(classified, ActiveRun{Run: run, Activity: ActivityIdle})
+				continue
+			}
+			steps, err := database.GetStepsByRun(run.ID)
+			if err != nil {
+				return fmt.Errorf("get steps for run %s: %w", run.ID, err)
+			}
+			classified = append(classified, classifyRun(run, steps))
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	defer database.Close()
-	for _, run := range runs {
-		steps, err := database.GetStepsByRun(run.ID)
-		if err != nil {
-			return nil, fmt.Errorf("get steps for run %s: %w", run.ID, err)
-		}
-		classified = append(classified, classifyRun(run, steps))
 	}
 	return classified, nil
 }
 
+// classifyRun reads a live daemon's own evidence for one run. A pending row is
+// not a queued run: there is no queue, and pending is the window inside
+// startRun where the daemon is building the worktree, copying the git
+// identity, and fetching the trusted default branch for this run. A daemon
+// that restarts fails every pending row rather than resuming it, so a pending
+// row a live daemon still holds is one it is driving right now.
 func classifyRun(run *db.Run, steps []*db.StepResult) ActiveRun {
-	// A queued run has not started, so it owns no step and no worktree state.
-	if run.Status == types.RunPending {
-		return ActiveRun{Run: run, Activity: ActivityIdle}
-	}
 	for _, step := range steps {
 		switch step.Status {
 		case types.StepStatusRunning, types.StepStatusFixing:

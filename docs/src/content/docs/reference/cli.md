@@ -457,9 +457,10 @@ Start the daemon, installing or refreshing the managed service when possible.
 
 ```sh
 no-mistakes daemon start
+no-mistakes daemon start --abandon-executing-runs
 ```
 
-Prefers the managed service path and falls back to a detached daemon if service install or startup is unavailable or fails. If the daemon is already running, the command refreshes a stale macOS `launchd` or Linux `systemd` service definition and restarts through the managed service; if the definition is unchanged, it reports that the daemon is already running. [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the startup readiness, timeout, fallback cleanup, and singleton lifecycle details.
+Prefers the managed service path and falls back to a detached daemon if service install or startup is unavailable or fails. If the daemon is already running, the command refreshes a stale macOS `launchd` or Linux `systemd` service definition and restarts through the managed service; if the definition is unchanged, it reports that the daemon is already running. Because that refresh stops the running daemon, the command refuses while a run is executing a step unless you pass `--abandon-executing-runs`. [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns that guard, plus the startup readiness, timeout, fallback cleanup, and singleton lifecycle details.
 
 ## no-mistakes daemon stop
 

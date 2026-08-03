@@ -11,7 +11,13 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
 
-func logLifecycleInvocation(command string, force bool) {
+// logLifecycleInvocation records who invoked a destructive lifecycle command.
+// force and abandonExecuting are recorded separately because they authorize
+// materially different destruction: --force covers only runs that survive a
+// daemon stop, while --abandon-executing-runs deliberately fails a run
+// mid-step. An incident investigation has to be able to tell them apart from
+// this line alone.
+func logLifecycleInvocation(command string, force, abandonExecuting bool) {
 	p, err := paths.New()
 	if err != nil {
 		return
@@ -19,15 +25,16 @@ func logLifecycleInvocation(command string, force bool) {
 	_ = p.EnsureDirs()
 
 	line := fmt.Sprintf(
-		"%s lifecycle command=%s force=%t pid=%d ppid=%d parent_cmdline=%q\n",
+		"%s lifecycle command=%s force=%t abandon_executing=%t pid=%d ppid=%d parent_cmdline=%q\n",
 		time.Now().Format(time.RFC3339),
 		command,
 		force,
+		abandonExecuting,
 		os.Getpid(),
 		os.Getppid(),
 		parentCommandLine(os.Getppid()),
 	)
-	if force {
+	if force || abandonExecuting {
 		line = strings.Replace(line, "lifecycle ", "lifecycle FORCE ", 1)
 	}
 

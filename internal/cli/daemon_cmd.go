@@ -255,16 +255,21 @@ func dedupeSteps(steps []types.StepName) []types.StepName {
 }
 
 func newDaemonStartCmd() *cobra.Command {
-	return &cobra.Command{
+	var abandonExecuting bool
+	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "Install or refresh the managed daemon service and start it",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			logLifecycleInvocation("daemon.start", false, abandonExecuting)
 			return trackCommand("daemon.start", func() error {
 				p, err := paths.New()
 				if err != nil {
 					return err
 				}
 				if err := p.EnsureDirs(); err != nil {
+					return err
+				}
+				if err := guardDaemonStartAgainstExecutingRuns(p, "daemon start", abandonExecuting); err != nil {
 					return err
 				}
 				if err := daemonStartFn(p); err != nil {
@@ -275,6 +280,8 @@ func newDaemonStartCmd() *cobra.Command {
 			})
 		},
 	}
+	cmd.Flags().BoolVar(&abandonExecuting, "abandon-executing-runs", false, "refresh a stale service definition even while a run is executing a step, failing that run")
+	return cmd
 }
 
 func newDaemonStopCmd() *cobra.Command {
@@ -284,7 +291,7 @@ func newDaemonStopCmd() *cobra.Command {
 		Use:   "stop",
 		Short: "Stop the running daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			logLifecycleInvocation("daemon.stop", force || abandonExecuting)
+			logLifecycleInvocation("daemon.stop", force, abandonExecuting)
 			return trackCommand("daemon.stop", func() error {
 				p, err := paths.New()
 				if err != nil {
@@ -302,7 +309,7 @@ func newDaemonStopCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "stop the daemon even when parked or idle pipeline runs exist")
-	cmd.Flags().BoolVar(&abandonExecuting, "abandon-executing-runs", false, "also stop the daemon while a run is executing a step, failing that run")
+	cmd.Flags().BoolVar(&abandonExecuting, "abandon-executing-runs", false, "also stop the daemon while a run is executing a step, failing that run (implies --force)")
 	return cmd
 }
 
@@ -313,7 +320,7 @@ func newDaemonRestartCmd() *cobra.Command {
 		Use:   "restart",
 		Short: "Restart the daemon (stop if running, then start)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			logLifecycleInvocation("daemon.restart", force || abandonExecuting)
+			logLifecycleInvocation("daemon.restart", force, abandonExecuting)
 			return trackCommand("daemon.restart", func() error {
 				p, err := paths.New()
 				if err != nil {
@@ -337,7 +344,7 @@ func newDaemonRestartCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "restart the daemon even when parked or idle pipeline runs exist")
-	cmd.Flags().BoolVar(&abandonExecuting, "abandon-executing-runs", false, "also restart the daemon while a run is executing a step, failing that run")
+	cmd.Flags().BoolVar(&abandonExecuting, "abandon-executing-runs", false, "also restart the daemon while a run is executing a step, failing that run (implies --force)")
 	return cmd
 }
 
@@ -353,20 +360,21 @@ func guardDestructiveDaemonLifecycle(p *paths.Paths, stderr io.Writer, action st
 	// A health probe that errors has not proven the daemon is down. Assume it
 	// is up so runs are classified on their own evidence rather than written
 	// off as idle: this guard's job is to fail closed.
-	alive, err := daemonIsRunningFn(p)
-	if err != nil {
-		alive = true
-	}
-	runs, err := lifecycle.ClassifyActiveRuns(p, alive)
+	runs, err := lifecycle.ClassifyActiveRuns(p, func() bool {
+		alive, err := daemonIsRunningFn(p)
+		if err != nil {
+			return true
+		}
+		return alive
+	})
 	if err != nil {
 		return fmt.Errorf("check active pipeline runs: %w", err)
 	}
 	if len(runs) == 0 {
 		return nil
 	}
-	if executing := lifecycle.ExecutingRuns(runs); len(executing) > 0 && !abandonExecuting {
-		return fmt.Errorf("refusing %s because %d active pipeline %s executing a step right now; --force does not cover executing runs, because stopping the daemon cancels the step and strands the run's pipeline commits in the local gate. Wait for the step to finish or park at a gate, end the run with `no-mistakes axi abort --run <id>`, or pass --abandon-executing-runs to fail it deliberately\n%s",
-			action, len(executing), runNoun(len(executing)), lifecycle.ExecutingRunList(executing))
+	if err := refuseExecutingRuns(action, "--force does not cover executing runs, because ", runs, abandonExecuting); err != nil {
+		return err
 	}
 	if force || abandonExecuting {
 		fmt.Fprintf(stderr, "FORCE: %s will stop/restart the daemon while %d active pipeline runs are in progress\n", action, len(runs))
@@ -374,6 +382,40 @@ func guardDestructiveDaemonLifecycle(p *paths.Paths, stderr io.Writer, action st
 		return nil
 	}
 	return fmt.Errorf("refusing %s because %d active pipeline runs are in progress; pass --force to stop/restart the daemon anyway\n%s", action, len(runs), lifecycle.ActiveRunList(runs))
+}
+
+// guardDaemonStartAgainstExecutingRuns closes the same hole for `daemon start`,
+// which is destructive in one shape: with a daemon already running, Start
+// refreshes a drifted managed service definition by stopping the current
+// daemon and restarting the service. That kills whatever step is executing and
+// strands its pipeline commits, exactly like an unguarded `daemon stop`.
+//
+// Only the executing tier applies. Starting the daemon is how an operator
+// recovers from a dead one, so parked and idle rows must never refuse it. The
+// probe is read strictly: only a daemon that answers healthy can reach the
+// service-refresh path inside Start, so unlike stop and restart a probe error
+// means the destructive branch is unreachable rather than unproven.
+func guardDaemonStartAgainstExecutingRuns(p *paths.Paths, action string, abandonExecuting bool) error {
+	runs, err := lifecycle.ClassifyActiveRuns(p, func() bool {
+		alive, err := daemonIsRunningFn(p)
+		return err == nil && alive
+	})
+	if err != nil {
+		return fmt.Errorf("check active pipeline runs: %w", err)
+	}
+	return refuseExecutingRuns(action, "refreshing a stale managed service definition restarts the daemon, and ", runs, abandonExecuting)
+}
+
+func refuseExecutingRuns(action, scopeNote string, runs []lifecycle.ActiveRun, abandonExecuting bool) error {
+	if abandonExecuting {
+		return nil
+	}
+	executing := lifecycle.ExecutingRuns(runs)
+	if len(executing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("refusing %s because %d active pipeline %s executing a step right now; %sstopping the daemon cancels the step and strands the run's pipeline commits in the local gate. Wait for the step to finish or park at a gate, end the run with `no-mistakes axi abort --run <id>`, or pass --abandon-executing-runs to fail it deliberately\n%s",
+		action, len(executing), runNoun(len(executing)), scopeNote, lifecycle.ExecutingRunList(executing))
 }
 
 func runNoun(count int) string {

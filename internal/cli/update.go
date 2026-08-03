@@ -14,7 +14,7 @@ func newUpdateCmd() *cobra.Command {
 		Short: "Self-update (disabled in this build; rebuild from source instead)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			logLifecycleInvocation("update", force)
+			logLifecycleInvocation("update", force, false)
 			return trackCommand("update", func() error {
 				return update.Run(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), update.RunOptions{Beta: beta, Yes: yes, Force: force, Stdin: cmd.InOrStdin()})
 			})

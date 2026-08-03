@@ -56,7 +56,9 @@ no-mistakes axi respond
 
 `--force` deliberately does not cover a run that is executing a step. Stopping the daemon cancels the step, fails the run, and leaves its pipeline commits stranded in the local gate repo, so forcing past it destroys work that no restart brings back. Each command takes a separate `--abandon-executing-runs` for that case, which implies `--force`. Prefer waiting for the step to finish or park at a gate, or ending the run explicitly with `no-mistakes axi abort --run <id>`, which takes it terminal cleanly instead of failing it mid-step.
 
-A run counts as executing whenever a daemon is serving this `NM_HOME` and the run is not positively parked or idle, which includes the moment between two steps. When no daemon is serving it, nothing can be mid-step and every remaining active row counts as idle.
+A run counts as executing whenever a daemon is serving this `NM_HOME` and the run is not positively parked, which includes the moment between two steps and a `pending` run the daemon is still setting up. When no daemon is serving it, nothing can be mid-step and every remaining active row counts as idle.
+
+`no-mistakes daemon start` applies the executing tier of the same guard, because when the daemon is already running it refreshes a stale service definition by stopping and restarting it. It has no `--force`, since starting the daemon is how you recover from a stopped one and parked or idle runs never stand in the way; only an executing run refuses it, and only `--abandon-executing-runs` proceeds past that.
 
 That `--force` override is available only to an ordinary top-level caller. A
 process descended from an active validation-step agent cannot start, stop,
