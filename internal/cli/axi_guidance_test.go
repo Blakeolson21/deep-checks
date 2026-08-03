@@ -46,10 +46,7 @@ var canonicalBranchSyncPhrases = []string{
 	"reset, stash, merge, rebase, force, or branch replacement",
 	// Guarded custody recovery for a terminal run whose pipeline commits were
 	// never published (v1.38.1 dogfood catch): the action, its next_action
-	// code, and the custody claim must stay on every guidance surface. The
-	// claim names custody, not preservation - a rebase-only head may no longer
-	// exist anywhere (the 2026-08-03 custody deadlock), so guidance must not
-	// promise the commits survived.
+	// code, and the custody claim must stay on every guidance surface.
 	"recover_custody",
 	"no-mistakes axi sync --recover",
 	// The claim names custody, not preservation - a rebase-only head may no

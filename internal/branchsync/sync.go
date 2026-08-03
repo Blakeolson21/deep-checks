@@ -1074,10 +1074,16 @@ func (s *Service) finishRecover(ctx context.Context, run *db.Run, changed bool) 
 	return state
 }
 
-// attachUnclaimedAnchors reports every private ref this recovery left holding a
-// commit the returned branch does not contain, so a custody return never hides
-// where work went. It is the single owner of that reporting: every path that
-// returns a recovered state must agree, including the idempotent re-recovery.
+// attachUnclaimedAnchors reports the private refs holding CONTENT the returned
+// branch does not carry - the preserved pipeline head and the gate head a
+// keep-local swap let go - so a custody return never hides where work went. It
+// is the single owner of that reporting: every path that returns a recovered
+// state must agree, including the idempotent re-recovery.
+//
+// recoverLocalAnchorRef is deliberately out of scope even though the branch
+// cannot reach its commits: an adoption only happens once
+// preservedContainsLocalWork proves the adopted head carries every local
+// change, so that anchor pins superseded SHAs of content the branch still has.
 func (s *Service) attachUnclaimedAnchors(ctx context.Context, runID string, state *State) {
 	state.PreservedAnchorRef = s.unclaimedAnchorRef(ctx, recoverAnchorRef(runID), state.Local.Head)
 	state.AbandonedAnchorRef = s.unclaimedAnchorRef(ctx, recoverAbandonedAnchorRef(runID), state.Local.Head)
