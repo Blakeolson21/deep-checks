@@ -1871,6 +1871,53 @@ func TestRecoverKeepLocalDoesNotAnchorAContainedGateHead(t *testing.T) {
 	}
 }
 
+// TestRecoverReportsTheAnchorHoldingWorkTheBranchLost: a custody return that
+// leaves the branch WITHOUT the preserved pipeline commits (the frozen-gate row
+// rescues a stranded head into a private ref, and --keep-local deliberately
+// abandons the preserved head) reports success with changed: false, which on its
+// own reads as "nothing happened". The anchor is then the only reference to
+// pipeline-authored work such as an agent's conflict resolutions, so the success
+// must name it. A recovery that ends AT the preserved head must not.
+func TestRecoverReportsTheAnchorHoldingWorkTheBranchLost(t *testing.T) {
+	t.Run("frozen gate leaves the stranded head anchored", func(t *testing.T) {
+		f := newStrandedFixture(t)
+		state := f.service.Recover(f.ctx, false)
+		if !state.Recovered || state.Changed {
+			t.Fatalf("frozen-gate recover = %#v", state)
+		}
+		if state.PreservedAnchorRef != f.anchorRef() {
+			t.Fatalf("preserved anchor = %q, want %s holding the stranded head", state.PreservedAnchorRef, f.anchorRef())
+		}
+		if got := mustRun(t, f.local, "rev-parse", state.PreservedAnchorRef); got != f.preserved {
+			t.Fatalf("reported anchor holds %s, want the stranded head %s", got, f.preserved)
+		}
+	})
+	t.Run("keep-local abandons the preserved head", func(t *testing.T) {
+		f := newRecoverFixture(t, types.RunCancelled)
+		mustWrite(t, filepath.Join(f.local, "rescope.txt"), "rescope\n")
+		mustRun(t, f.local, "add", "rescope.txt")
+		mustRun(t, f.local, "commit", "-m", "diverging rescope")
+
+		state := f.service.Recover(f.ctx, true)
+		if !state.Recovered {
+			t.Fatalf("keep-local recover = %#v", state)
+		}
+		if state.PreservedAnchorRef != f.anchorRef() {
+			t.Fatalf("preserved anchor = %q, want %s", state.PreservedAnchorRef, f.anchorRef())
+		}
+	})
+	t.Run("a branch that took the preserved head names no anchor", func(t *testing.T) {
+		f := newRecoverFixture(t, types.RunCancelled)
+		state := f.service.Recover(f.ctx, false)
+		if !state.Recovered || !state.Changed {
+			t.Fatalf("fast-forward recover = %#v", state)
+		}
+		if state.PreservedAnchorRef != "" {
+			t.Fatalf("preserved anchor = %q, want none: the branch carries the preserved head", state.PreservedAnchorRef)
+		}
+	})
+}
+
 // TestRecoverKeepLocalRefusalLeavesNoAnchorBehind keeps the "a refusal changes
 // nothing" promise literal. The abandonment anchor may only be written once the
 // recovery is actually about to move the gate branch: a refusal that still

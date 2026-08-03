@@ -1284,6 +1284,18 @@ func (e *Executor) reconcileTerminalRunHead(run *db.Run) (string, bool) {
 		slog.Warn("worktree head is not a verified descendant before terminalization", "run", run.ID, "error", err)
 		return "", false
 	}
+	// The worktree is detached, so a head recorded on the run but held by no ref
+	// dies with the worktree and strands the branch in pipeline custody with no
+	// working recovery. Terminalization is the last writer of runs.head_sha, so
+	// it owes the same adoption every step writer performs; when the guarded
+	// move refuses (another push owns the branch), the run keeps the last
+	// adopted head instead of recording one nothing references.
+	if err := git.AdoptBranchRef(func(args ...string) (string, error) {
+		return git.Run(ctx, e.workDir, args...)
+	}, run.Branch, observed, recorded); err != nil {
+		slog.Warn("worktree head could not be adopted on the branch ref before terminalization", "run", run.ID, "error", err)
+		return "", false
+	}
 	return observed, true
 }
 

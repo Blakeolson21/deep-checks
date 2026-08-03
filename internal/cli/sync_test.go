@@ -945,6 +945,11 @@ func TestAxiSyncRecoverDivergedRefusesThenKeepLocalSucceeds(t *testing.T) {
 	if !strings.Contains(out, "recovered: true") {
 		t.Fatalf("keep-local output:\n%s", out)
 	}
+	// The kept head does not carry the preserved pipeline commits, so the
+	// success must name the ref that still holds them.
+	if !strings.Contains(out, "preserved_anchor: refs/no-mistakes/recover/") {
+		t.Fatalf("keep-local success does not name the anchor holding the abandoned pipeline head:\n%s", out)
+	}
 	if got := cliGit(t, f.local, "rev-parse", "HEAD"); got != divergedHead {
 		t.Fatal("keep-local moved the worktree")
 	}

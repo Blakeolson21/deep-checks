@@ -77,9 +77,17 @@ type State struct {
 	// returned (by this call or an earlier, idempotent one), or the terminal
 	// outcome had already released the branch (user_owned), making recovery an
 	// idempotent no-op.
-	Recovered  bool
-	NextAction *NextAction
-	Error      string
+	Recovered bool
+	// PreservedAnchorRef names the private ref holding pipeline commits the
+	// returned branch does NOT contain, and is set only when custody returns
+	// that way: the frozen-gate row anchors a stranded head the branch never
+	// reaches, and --keep-local deliberately abandons the preserved head. Both
+	// report changed: false, so without this the only record of pipeline-authored
+	// work (an agent's conflict resolutions, for instance) is a ref no output
+	// names. It stays empty whenever the branch ends up carrying that work.
+	PreservedAnchorRef string
+	NextAction         *NextAction
+	Error              string
 }
 
 type LocalState struct {
@@ -520,9 +528,13 @@ func (s *Service) Apply(ctx context.Context) State {
 // then reports custody_returned (never-pushed runs) or the ordinary
 // classification against the last push binding (pushed runs), both pointing at
 // run_pipeline as the next step. `no-mistakes rerun` remains the alternative
-// exit: it starts a fresh run from the current gate branch head instead of
-// taking the branch back, and that head is the pipeline's only where the
-// pipeline adopted one there.
+// exit: it starts a fresh run from the current gate branch head, which is the
+// pipeline head only when the pipeline adopted one there.
+//
+// When custody returns while the branch does NOT carry the preserved pipeline
+// commits (the frozen-gate row, and --keep-local anywhere), the anchor holding
+// them is reported as PreservedAnchorRef so the success output names the only
+// remaining reference to that work.
 func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 	if refusal, blocked := s.gateContextRefusal(ctx); blocked {
 		return refusal
@@ -1057,7 +1069,24 @@ func (s *Service) finishRecover(ctx context.Context, run *db.Run, changed bool) 
 	state, _, _ := s.inspect(ctx)
 	state.Recovered = true
 	state.Changed = changed
+	state.PreservedAnchorRef = s.unclaimedPreservedAnchor(ctx, run, state.Local.Head)
 	return state
+}
+
+// unclaimedPreservedAnchor returns the recover anchor ref when it pins pipeline
+// commits the recovered branch does not contain, and "" when the branch carries
+// them (or nothing was preservable).
+func (s *Service) unclaimedPreservedAnchor(ctx context.Context, run *db.Run, localHead string) string {
+	preserved := strings.TrimSpace(run.HeadSHA)
+	wd := s.workDir()
+	if preserved == "" || preserved == localHead || isAncestor(ctx, wd, preserved, localHead) {
+		return ""
+	}
+	ref := recoverAnchorRef(run.ID)
+	if anchored, err := git.Run(ctx, wd, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err == nil && strings.TrimSpace(anchored) == preserved {
+		return ref
+	}
+	return ""
 }
 
 func recoverAnchorRef(runID string) string {
