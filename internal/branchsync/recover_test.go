@@ -1947,7 +1947,7 @@ func TestRecoverRebasedPipelineHeadReturnsCustody(t *testing.T) {
 	if got := mustRun(t, local, "rev-parse", "HEAD"); got != rebased {
 		t.Fatalf("local HEAD = %s, want the preserved rebased head %s", got, rebased)
 	}
-	if got := mustRun(t, local, "rev-parse", "refs/no-mistakes/sync-anchor/"+run.ID); got != submitted {
+	if got := mustRun(t, local, "rev-parse", "refs/no-mistakes/recover-local/"+run.ID); got != submitted {
 		t.Fatalf("pre-recovery local head anchor = %s, want %s", got, submitted)
 	}
 	if got := mustRun(t, local, "rev-parse", "refs/no-mistakes/recover/"+run.ID); got != rebased {
