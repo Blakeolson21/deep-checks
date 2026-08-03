@@ -120,6 +120,9 @@ func anchorNotice(state *branchsync.State) string {
 	if state.AbandonedAnchorRef != "" {
 		notice += fmt.Sprintf(" The gate head this recovery let go stays anchored at %s.", state.AbandonedAnchorRef)
 	}
+	if state.LostPipelineHead != "" {
+		notice += fmt.Sprintf(" Pipeline head %s survives in no object store and could not be anchored.", state.LostPipelineHead)
+	}
 	return notice
 }
 

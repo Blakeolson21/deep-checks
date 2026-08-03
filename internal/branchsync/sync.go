@@ -89,8 +89,14 @@ type State struct {
 	// output names. Each stays empty whenever the branch carries that commit.
 	PreservedAnchorRef string
 	AbandonedAnchorRef string
-	NextAction         *NextAction
-	Error              string
+	// LostPipelineHead is the recorded pipeline head of a returned run that the
+	// branch does not contain and that no object store still holds. The
+	// frozen-gate row rescues that commit whenever it survives; when it does
+	// not, an empty anchor set alone cannot distinguish a pipeline that produced
+	// nothing from one whose work was destroyed, so the lost commit is named.
+	LostPipelineHead string
+	NextAction       *NextAction
+	Error            string
 }
 
 type LocalState struct {
@@ -537,8 +543,9 @@ func (s *Service) Apply(ctx context.Context) State {
 // Whenever a recovered branch does NOT carry a commit this recovery anchored
 // (the frozen-gate row, and --keep-local anywhere), the holding ref is reported
 // as PreservedAnchorRef or AbandonedAnchorRef so the success output names the
-// only remaining reference to that work, and re-running the idempotent recovery
-// reports exactly the same refs.
+// only remaining reference to that work; a recorded pipeline head that survived
+// nowhere is reported as LostPipelineHead instead of silently absent. Re-running
+// the idempotent recovery reports exactly the same facts.
 func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 	if refusal, blocked := s.gateContextRefusal(ctx); blocked {
 		return refusal
@@ -547,7 +554,7 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 	if run != nil && run.CustodyReturnedAt != nil {
 		state.Recovered = true
 		state.Changed = false
-		s.attachUnclaimedAnchors(ctx, run.ID, &state)
+		s.attachUnclaimedAnchors(ctx, run, &state)
 		return state
 	}
 	// A branch released by its terminal outcome is already the operator's:
@@ -1070,23 +1077,47 @@ func (s *Service) finishRecover(ctx context.Context, run *db.Run, changed bool) 
 	state, _, _ := s.inspect(ctx)
 	state.Recovered = true
 	state.Changed = changed
-	s.attachUnclaimedAnchors(ctx, run.ID, &state)
+	s.attachUnclaimedAnchors(ctx, run, &state)
 	return state
 }
 
-// attachUnclaimedAnchors reports the private refs holding CONTENT the returned
-// branch does not carry - the preserved pipeline head and the gate head a
-// keep-local swap let go - so a custody return never hides where work went. It
-// is the single owner of that reporting: every path that returns a recovered
+// attachUnclaimedAnchors accounts for every commit CONTENT the returned branch
+// does not carry, so a custody return never hides where work went: the
+// preserved pipeline head and the gate head a keep-local swap let go are
+// reported as the private refs that hold them, and a recorded pipeline head
+// that survives in no object store is reported as lost rather than passed over
+// in silence - "custody returned, nothing anchored" would otherwise read
+// identically whether the pipeline produced nothing or its work was destroyed.
+// It is the single owner of that reporting: every path that returns a recovered
 // state must agree, including the idempotent re-recovery.
 //
 // recoverLocalAnchorRef is deliberately out of scope even though the branch
 // cannot reach its commits: an adoption only happens once
 // preservedContainsLocalWork proves the adopted head carries every local
 // change, so that anchor pins superseded SHAs of content the branch still has.
-func (s *Service) attachUnclaimedAnchors(ctx context.Context, runID string, state *State) {
-	state.PreservedAnchorRef = s.unclaimedAnchorRef(ctx, recoverAnchorRef(runID), state.Local.Head)
-	state.AbandonedAnchorRef = s.unclaimedAnchorRef(ctx, recoverAbandonedAnchorRef(runID), state.Local.Head)
+func (s *Service) attachUnclaimedAnchors(ctx context.Context, run *db.Run, state *State) {
+	state.PreservedAnchorRef = s.unclaimedAnchorRef(ctx, recoverAnchorRef(run.ID), state.Local.Head)
+	state.AbandonedAnchorRef = s.unclaimedAnchorRef(ctx, recoverAbandonedAnchorRef(run.ID), state.Local.Head)
+	state.LostPipelineHead = s.unreachablePipelineHead(ctx, run.HeadSHA, state.Local.Head)
+}
+
+// unreachablePipelineHead returns the recorded pipeline head when the branch
+// does not contain it and no object store still holds it, and "" otherwise. A
+// commit that still exists anywhere is never called lost: the recovery anchors
+// it, and claiming destruction for a commit that survives is its own dishonesty.
+func (s *Service) unreachablePipelineHead(ctx context.Context, preserved, localHead string) string {
+	preserved = strings.TrimSpace(preserved)
+	wd := s.workDir()
+	if preserved == "" || preserved == localHead || isAncestor(ctx, wd, preserved, localHead) {
+		return ""
+	}
+	if objectExists(ctx, wd, preserved) {
+		return ""
+	}
+	if gateDir := strings.TrimSpace(s.GateDir); gateDir != "" && objectExists(ctx, gateDir, preserved) {
+		return ""
+	}
+	return preserved
 }
 
 // unclaimedAnchorRef returns ref when it resolves to a commit the branch head

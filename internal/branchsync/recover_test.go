@@ -1990,6 +1990,55 @@ func TestRecoverFrozenGateRefusalNamesTheAnchorItWrote(t *testing.T) {
 	}
 }
 
+// TestRecoverNamesAPipelineHeadThatSurvivedNowhere closes the last silent case
+// in the frozen-gate row. When the recorded pipeline head is gone from every
+// object store there is nothing to anchor, and "custody returned, no anchor"
+// then reads exactly the same as a run that produced nothing past submission -
+// hiding the one outcome where pipeline-authored work was actually destroyed.
+func TestRecoverNamesAPipelineHeadThatSurvivedNowhere(t *testing.T) {
+	f := newStrandedFixture(t)
+	// Model the production loss: the detached worktree that created the commit
+	// was removed, no ref holds it, and the gate has since been pruned.
+	mustRun(t, f.gate, "reflog", "expire", "--expire=now", "--all")
+	mustRun(t, f.gate, "gc", "--prune=now", "--quiet")
+	if _, err := gitpkg.Run(f.ctx, f.gate, "cat-file", "-e", f.preserved+"^{commit}"); err == nil {
+		t.Skip("this Git build kept the unreferenced pipeline commit after pruning")
+	}
+
+	state := f.service.Recover(f.ctx, false)
+	if !state.Recovered || state.Changed {
+		t.Fatalf("frozen-gate recover with a destroyed head = %#v", state)
+	}
+	if state.PreservedAnchorRef != "" {
+		t.Fatalf("anchored a commit that no longer exists: %q", state.PreservedAnchorRef)
+	}
+	if state.LostPipelineHead != f.preserved {
+		t.Fatalf("lost pipeline head = %q, want the destroyed recorded head %s", state.LostPipelineHead, f.preserved)
+	}
+
+	again := f.service.Recover(f.ctx, false)
+	if again.LostPipelineHead != state.LostPipelineHead {
+		t.Fatalf("idempotent recover reported lost head %q, want the first call's %q", again.LostPipelineHead, state.LostPipelineHead)
+	}
+}
+
+// TestRecoverDoesNotCallASurvivingHeadLost is the other half: a commit the
+// recovery successfully anchored is never reported as destroyed.
+func TestRecoverDoesNotCallASurvivingHeadLost(t *testing.T) {
+	f := newStrandedFixture(t)
+
+	state := f.service.Recover(f.ctx, false)
+	if !state.Recovered {
+		t.Fatalf("frozen-gate recover = %#v", state)
+	}
+	if state.PreservedAnchorRef != f.anchorRef() {
+		t.Fatalf("preserved anchor = %q, want %s", state.PreservedAnchorRef, f.anchorRef())
+	}
+	if state.LostPipelineHead != "" {
+		t.Fatalf("reported a surviving anchored head as lost: %q", state.LostPipelineHead)
+	}
+}
+
 // TestRecoverAnchorFailureNamesTheAnchorAlreadyWritten covers the refusals
 // inside the anchor helpers themselves. The frozen-gate row rescues the
 // stranded pipeline head into refs/no-mistakes/recover/<run> before keep-local

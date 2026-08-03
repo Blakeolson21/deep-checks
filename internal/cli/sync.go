@@ -266,6 +266,9 @@ func printHumanSyncState(cmd *cobra.Command, state branchsync.State) {
 	if state.AbandonedAnchorRef != "" {
 		fmt.Fprintf(w, "  anchored: %s holds the gate head this recovery let go\n", state.AbandonedAnchorRef)
 	}
+	if state.LostPipelineHead != "" {
+		fmt.Fprintf(w, "  lost:     pipeline head %s survives in no object store and could not be anchored\n", state.LostPipelineHead)
+	}
 	if state.Error != "" {
 		fmt.Fprintf(w, "  blocked:  %s\n", state.Error)
 	}
@@ -462,6 +465,9 @@ func branchSyncField(state branchsync.State) toON.Field {
 	}
 	if state.AbandonedAnchorRef != "" {
 		fields = append(fields, toON.Field{Key: "abandoned_anchor", Value: state.AbandonedAnchorRef})
+	}
+	if state.LostPipelineHead != "" {
+		fields = append(fields, toON.Field{Key: "lost_pipeline_head", Value: state.LostPipelineHead})
 	}
 	fields = append(fields,
 		toON.Field{Key: "local", Value: toON.NewObject(local...)},
