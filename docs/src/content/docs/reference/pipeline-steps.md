@@ -129,7 +129,9 @@ Updates matching documentation for code changes and reports only unresolved gaps
 - The placement policy gives each fact one authoritative owner, prefers removing stale duplicates or replacing them with pointers, avoids new documentation surfaces for perceived gaps, and keeps durable incident lessons near their owner instead of in `AGENTS.md`
 - `document.instructions` can add trusted default-branch ownership rules for the repository
 - When `commands.lint` is empty, performs documentation and agent-driven lint in one combined housekeeping invocation, categorizing findings for the document or lint gate; if that pass is skipped, its structured output is unusable, or a daemon restart loses the in-memory result, lint runs its own agent pass instead
-- Includes user intent when available
+- Includes user intent when available, as context rather than authority: review owns intent conformance and may have deliberately settled on a conclusion the intent contradicts, so the document step may not delete, revert, weaken, or reword committed content to make it agree with the intent, and reports such a disagreement as an `ask-user` finding instead
+- After the pass commits, verifies it did not reverse a decision review settled in the same run: a deterministic screen looks for substantive lines earlier pipeline steps added that this pass removed without reinstating anywhere, and when the screen fires an agent judge rules on whether the meaning was actually lost. Rewording, moving content to its owner document, removing a duplicate whose owner survives, and mechanical lint fixes are not reversals
+- A confirmed reversal fails the run instead of pausing a gate, because a parked gate can be answered with another fix round through the same prompt that caused the loss. A screen or judge that cannot evaluate also fails the run rather than passing unchecked
 - Returns findings only for unresolved documentation gaps or human judgment calls
 - Requires approval whenever any unresolved documentation finding is returned, including `info` findings
 

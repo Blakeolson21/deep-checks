@@ -201,7 +201,7 @@ Everything lives under `~/.no-mistakes/` by default. Set `NM_HOME` to relocate i
 | `daemon.lock`                    | Singleton lock; the OS lock a live daemon holds so a second daemon for the same root cannot start                       |
 | `config.yaml`                    | Global configuration                                                                                                    |
 | `telemetry-gate.json`            | Persistent read-only telemetry dedupe state                                                                             |
-| `update-check.json`              | Cached update check result                                                                                              |
+| `update-check.json`              | Cached update check result; never written in this build because self-update and its background checks are disabled      |
 | `servers/`                       | PID-tracking records for managed agent servers                                                                          |
 | `repos/<id>.git`                 | Bare gate repos                                                                                                         |
 | `repos/<id>.git/notify-push.log` | Persistent hook notification failure log                                                                                |
