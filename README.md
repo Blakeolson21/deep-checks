@@ -61,7 +61,15 @@ Nothing reaches the configured push target until every check is green.
 curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh
 ```
 
-> **Note:** this installer delivers the upstream `kunchenguid/no-mistakes` build, which does not carry this fork's local patches. To keep them, build from a `Blakeolson21/no-slop` checkout as described under [Update](https://kunchenguid.github.io/no-mistakes/start-here/installation/#update).
+**That installer delivers the upstream `kunchenguid/no-mistakes` build.** It does not carry this fork's local patches, and self-update is disabled here so `no-mistakes update` cannot replace them either. To keep the patches, build from a `Blakeolson21/no-slop` checkout and replace the installed binary:
+
+```sh
+go build -o ~/.no-mistakes/bin/no-mistakes.new ./cmd/no-mistakes
+mv ~/.no-mistakes/bin/no-mistakes.new ~/.no-mistakes/bin/no-mistakes
+no-mistakes daemon restart
+```
+
+The install directory comes from `NO_MISTAKES_INSTALL_DIR` and defaults to `~/.no-mistakes/bin`; `docs/src/content/docs/start-here/installation.md` in this repository carries the full notes.
 
 Windows, Go install, and build-from-source instructions are in the [installation guide](https://kunchenguid.github.io/no-mistakes/start-here/installation/).
 
