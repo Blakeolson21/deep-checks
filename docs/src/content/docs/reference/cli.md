@@ -433,13 +433,17 @@ no-mistakes update --force
 
 Every one of these invocations fails with an explanation instead of replacing the binary. `--beta`, `-y`/`--yes`, and `--force` are still accepted by the command line, but none of them re-enable the update.
 
-This build comes from the `Blakeolson21/no-slop` fork, which carries local patches that exist in no published release. Downloading a release archive over it would silently drop every one of them, and the fork has no release channel of its own to point at, so rebuilding from source is the supported way to move it forward:
+This build comes from the `Blakeolson21/no-slop` fork, which carries local patches that exist in no published release. Downloading a release archive over it would silently drop every one of them, and the fork publishes no release archives of its own, so rebuilding from source is the supported way to move it forward:
 
 ```sh
-go build -o "$(command -v no-mistakes)" ./cmd/no-mistakes
+go build -o /tmp/no-mistakes ./cmd/no-mistakes
+mv /tmp/no-mistakes ~/.no-mistakes/bin/no-mistakes
+no-mistakes daemon restart
 ```
 
-Because the binary is never replaced, the daemon is never reset by this command. To pick up a rebuilt binary, restart the daemon yourself with `no-mistakes daemon restart`; [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the active-run guard that applies to it.
+Build to a temporary path and move the result into place rather than building straight over the installed binary. `go build -o` reuses the existing file when the link result is already cached, and on Linux writing to a file that is currently executing fails with `ETXTBSY`; a rename never does. Move onto the real binary rather than the `~/.local/bin` symlink `command -v` reports, because replacing the symlink leaves the managed service pointed at the old executable. Adjust the destination for a non-default `NM_HOME` or a `go install` layout.
+
+Because the binary is never replaced by the command itself, the daemon is never reset by it either; the restart above is what picks up a rebuild. [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the active-run guard that applies to it.
 
 Background update checks are disabled with the command, so no CLI invocation probes GitHub for releases, no upgrade notice is printed to stderr, and the TUI never shows an "update available" badge. `NO_MISTAKES_NO_UPDATE_CHECK=1` has no additional effect in this build.
 

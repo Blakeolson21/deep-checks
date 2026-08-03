@@ -52,7 +52,7 @@ no-mistakes axi respond
 
 `no-mistakes update` never resets the daemon in this build, because self-update is disabled and the binary is never replaced. After rebuilding from source, run `no-mistakes daemon restart` yourself; the [CLI reference](/no-mistakes/reference/cli/#no-mistakes-update) owns why the command is disabled.
 
-`no-mistakes daemon stop` and `no-mistakes daemon restart` guard against active work: if pending or running pipeline runs exist, each refuses by default, prints each active run's ID, status, branch, and short head SHA, and takes its own `--force` to proceed anyway. `-y`/`--yes` does not bypass this guard.
+`no-mistakes daemon stop` and `no-mistakes daemon restart` guard against active work: if pending or running pipeline runs exist, each refuses by default, prints each active run's ID, status, branch, and short head SHA, and takes its own `--force` to proceed anyway.
 That `--force` override is available only to an ordinary top-level caller. A
 process descended from an active validation-step agent cannot start, stop,
 restart, or update the daemon; recursive containment refuses the command before

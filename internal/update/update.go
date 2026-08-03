@@ -99,7 +99,15 @@ archive and overwrite this binary in place, silently dropping every patch.
 To move this build forward, rebuild from a checkout of
 github.com/Blakeolson21/no-slop:
 
-    go build -o "$(command -v no-mistakes)" ./cmd/no-mistakes`)
+    go build -o /tmp/no-mistakes ./cmd/no-mistakes
+    mv /tmp/no-mistakes ~/.no-mistakes/bin/no-mistakes
+    no-mistakes daemon restart
+
+Build to a temporary path and move it into place rather than building over the
+installed binary: a cached link result reuses that file, which fails with
+ETXTBSY on Linux while the daemon is executing it. Move onto the real binary
+rather than the symlink command -v reports, and adjust the destination for a
+non-default NM_HOME or a go install layout.`)
 
 // selfUpdateEnabled gates every exported entry point in this package. It is a
 // var rather than a const so the update machinery below stays reachable to the

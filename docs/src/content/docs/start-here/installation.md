@@ -3,6 +3,10 @@ title: Installation
 description: All install options, prerequisites, update, and uninstall.
 ---
 
+:::caution[These install paths deliver upstream, not this fork]
+Every option below installs `kunchenguid/no-mistakes`, which does not carry the local patches this build runs. Self-update is disabled precisely so a release archive cannot overwrite them, but reinstalling through any path here replaces them just the same. To keep the patches, build from a `Blakeolson21/no-slop` checkout as shown under [Update](#update).
+:::
+
 ## macOS / Linux
 
 ```sh
@@ -66,9 +70,12 @@ See [Provider Integration](/no-mistakes/guides/provider-integration/) for PR and
 Rebuild from a checkout instead, then restart the daemon so it picks up the new executable:
 
 ```sh
-go build -o "$(command -v no-mistakes)" ./cmd/no-mistakes
+go build -o /tmp/no-mistakes ./cmd/no-mistakes
+mv /tmp/no-mistakes ~/.no-mistakes/bin/no-mistakes
 no-mistakes daemon restart
 ```
+
+Build to a temporary path and move it into place: building straight over the installed binary reuses that file whenever the link result is cached, which fails with `ETXTBSY` on Linux while the daemon is running it. The destination is the real binary from the layout above, not the symlink; adjust it for a non-default `NM_HOME` or a `go install` layout.
 
 The [CLI reference](/no-mistakes/reference/cli/#no-mistakes-update) owns what the disabled command does with each flag; [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the active-run guard on the restart.
 

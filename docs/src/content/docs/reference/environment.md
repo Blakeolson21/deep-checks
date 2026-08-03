@@ -90,11 +90,12 @@ GitHub token used to authenticate updater release requests.
 
 When set, the updater sends the token as a Bearer authorization header for release metadata requests, including background update checks, and release asset downloads. `GITHUB_TOKEN` takes precedence over `GH_TOKEN`; when neither variable is set, these requests remain anonymous. The token is not printed, logged, or persisted.
 
-This variable has no effect in this build: self-update and its background checks are disabled, so no release request is ever made. See the [CLI reference](/no-mistakes/reference/cli/#no-mistakes-update).
+This variable no longer affects update behavior in this build: self-update and its background checks are disabled, so the updater never makes a release request. See the [CLI reference](/no-mistakes/reference/cli/#no-mistakes-update).
+It still matters everywhere else. The `gh` CLI that the PR and CI steps shell out to inherits the daemon's environment and authenticates from it, so unsetting the token breaks PR creation and CI polling.
 
 ## `GH_TOKEN`
 
-Fallback GitHub token used by `no-mistakes update` when `GITHUB_TOKEN` is unset or empty.
+Fallback GitHub token when `GITHUB_TOKEN` is unset or empty. The `gh` CLI behind the PR and CI steps reads it as well.
 
 |         |          |
 | ------- | -------- |
