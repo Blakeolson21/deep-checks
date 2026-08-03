@@ -470,6 +470,14 @@ func (s *Service) Apply(ctx context.Context) State {
 //	                     reconcile / rerun offered)     gate reset to it (CAS)
 //	P missing  any       refuse                         refuse
 //
+// A gate branch still frozen at the run's submitted head is its own row: the
+// pipeline adopted nothing past submission, so P was never published and can
+// never be fetched from the gate branch. P is still anchored when the gate's
+// object store or the invoking worktree can still reach it, and custody then
+// returns as a bookkeeping move (or, under --keep-local, at the local head
+// with the usual gate CAS) instead of deadlocking on a head the gate never
+// held.
+//
 // The containment row exists because a cancelled validation routinely leaves P
 // as a REBASE of the local branch onto a newer base: the same logical commits
 // with new SHAs, so equality and ancestry alone see only divergence and
@@ -496,6 +504,11 @@ func (s *Service) Apply(ctx context.Context) State {
 //     head instead of taking P, --keep-local never touches the worktree and moves
 //     the gate branch to the kept head with an atomic compare-and-swap, so a
 //     concurrent gate push wins and recovery refuses.
+//   - That compare-and-swap abandons whatever the gate branch pointed at, so
+//     unless the kept head already contains it or the recover anchor already
+//     pins it, it is first pinned at refs/no-mistakes/recover-abandoned/<runID>.
+//     The frozen-gate row is where the two differ: the anchor holds P while the
+//     commit being let go is the submitted head.
 //   - Anything unverifiable (missing gate where required, moved gate branch,
 //     failed anchor write or fetch, changed assumptions) refuses with a reason
 //     and changes nothing.
@@ -538,7 +551,19 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 		if err != nil {
 			return blockedPlan(state, StatePipelineOwned, "blocked_recover_unverified_head", "the terminal run has no verified head and the preserved gate head could not be read; no files or refs were changed")
 		}
-		if gateHead != run.HeadSHA {
+		// A gate branch still at the run's submitted head is exempt from the
+		// descent requirement: no descent can exist because the pipeline never
+		// adopted its recorded head anywhere (runs recorded before the rebase
+		// step anchored its head on the branch ref). The frozen-gate row below
+		// proves and handles exactly this shape; refusing here would deadlock
+		// those legacy runs on blocked_recover_unverified_head instead, and
+		// adopting the gate head here would overwrite the only record of the
+		// stranded head before that row could try to preserve it.
+		frozenAtSubmitted := false
+		if submitted := ptr(run.SubmittedHeadSHA); submitted != "" && gateHead == submitted && gateHead != run.HeadSHA {
+			frozenAtSubmitted = true
+		}
+		if gateHead != run.HeadSHA && !frozenAtSubmitted {
 			if !isAncestor(ctx, s.GateDir, run.HeadSHA, gateHead) {
 				return blockedPlan(state, StatePipelineOwned, "blocked_recover_unverified_head", "the terminal run has no verified head and the gate head does not descend from the recorded head; no files or refs were changed")
 			}
@@ -585,18 +610,39 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 	}
 	// A gate branch still at the run's SUBMITTED head means the pipeline never
 	// adopted anything past submission: every step that advances the run head
-	// with new content also moves refs/heads/<branch> in the gate, so a gate
-	// frozen at the submitted head proves the recorded pipeline head carries no
-	// unique commits (it can only be the submission replayed onto a newer base
-	// by the rebase step). That head was never published and cannot be fetched;
-	// insisting on verifying it here made recovery unreachable (dogfood runs
-	// 01KZ3Z8WZPDG7FHAG7QJF4S5DY and 01KZ4176DNSQCTVXXE0NNS8K2K: sync pointed
-	// at --recover, and --recover refused with blocked_recover_gate_diverged).
-	// Custody return is a bookkeeping no-op; nothing is anchored because there
-	// is nothing to preserve.
-	if submitted := ptr(run.SubmittedHeadSHA); submitted != "" && gateHead == submitted &&
-		(local == gateHead || isAncestor(ctx, wd, gateHead, local)) {
-		return s.finishRecover(ctx, run, false)
+	// with new content also moves refs/heads/<branch> in the gate. The recorded
+	// head was therefore never published and can never be fetched from the gate
+	// branch, so insisting on verifying it there made recovery unreachable
+	// (dogfood runs 01KZ3Z8WZPDG7FHAG7QJF4S5DY and 01KZ4176DNSQCTVXXE0NNS8K2K:
+	// sync pointed at --recover, and --recover refused with
+	// blocked_recover_gate_diverged).
+	//
+	// "The pipeline adopted nothing" is not the same as "nothing is
+	// preservable", so the stranded head is preserved rather than assumed away:
+	// a rebase whose conflicts an agent resolved records merge decisions that
+	// exist in no other commit, and the gate's object store can still hold them
+	// even though no ref does.
+	if submitted := ptr(run.SubmittedHeadSHA); submitted != "" && gateHead == submitted && gateHead != preserved {
+		if !anchored {
+			if blocked, ok := s.anchorStrandedPipelineHead(ctx, state, run.ID, gateDir, anchorRef, preserved); !ok {
+				return blocked
+			}
+		}
+		// --keep-local is the explicit escape hatch for this class and must work
+		// whatever the local branch has become. Requiring the local head to
+		// contain the submitted head left an operator who amended or reset while
+		// trying to get unstuck with no exit at all: the gate never held the
+		// recorded head, so the ordinary verification below can only refuse, and
+		// the branch would stay pipeline_owned forever.
+		if keepLocal {
+			return s.recoverKeepLocal(ctx, run, state, gateHead)
+		}
+		if local == gateHead || isAncestor(ctx, wd, gateHead, local) {
+			return s.finishRecover(ctx, run, false)
+		}
+		blocked := blockedPlan(state, StatePipelineOwned, "blocked_recover_gate_diverged", fmt.Sprintf("the pipeline never adopted its recorded head %s, and the local branch no longer contains the submitted head %s the gate still holds; fast-forward or reconcile onto it and re-run the recovery, or use --keep-local to return custody at the current local head; no files or refs were changed", preserved, gateHead))
+		blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "git log --oneline --left-right HEAD..." + gateHead}
+		return blocked
 	}
 	// A keep-local recovery that reset the gate but crashed before stamping
 	// custody resumes here: the gate already equals the kept local head and
@@ -884,6 +930,42 @@ func (s *Service) recoverAdoptPreserved(ctx context.Context, run *db.Run, state 
 		return state
 	}
 	return s.finishRecover(ctx, run, true)
+}
+
+// anchorStrandedPipelineHead best-effort pins a recorded pipeline head that no
+// ref points at, so a custody return never asserts "nothing was preservable"
+// without checking. The commit is usually already gone - the detached pipeline
+// worktree that created it was removed with the run - but when it survives it
+// is anchored: directly when the invoking worktree still has the object, and
+// otherwise by staging it on a private gate ref and fetching that. Staging
+// writes no branch and fires no gate hook, and the staging ref is always
+// removed. A genuinely unreachable commit is the only case treated as nothing
+// to preserve; a commit that is reachable but cannot be anchored refuses like
+// every other unverifiable preservation.
+func (s *Service) anchorStrandedPipelineHead(ctx context.Context, state State, runID, gateDir, anchorRef, preserved string) (State, bool) {
+	wd := s.workDir()
+	if strings.TrimSpace(preserved) == "" {
+		return State{}, true
+	}
+	if objectExists(ctx, wd, preserved) {
+		return s.anchorReachablePreserved(ctx, state, anchorRef, preserved)
+	}
+	if gateDir == "" || !objectExists(ctx, gateDir, preserved) {
+		return State{}, true
+	}
+	stagingRef := "refs/no-mistakes/custody-anchor/" + runID
+	if _, err := git.Run(ctx, gateDir, "update-ref", stagingRef, preserved); err != nil {
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the stranded pipeline head could not be staged in the local gate for preservation; no files or refs were changed"), false
+	}
+	_, fetchErr := git.Run(ctx, wd, "fetch", "--no-tags", "--no-write-fetch-head", gateDir, "+"+stagingRef+":"+anchorRef)
+	_, _ = git.Run(ctx, gateDir, "update-ref", "-d", stagingRef)
+	if fetchErr != nil {
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the stranded pipeline commits could not be fetched from the local gate; no files or refs were changed"), false
+	}
+	if fetched, err := git.Run(ctx, wd, "rev-parse", anchorRef+"^{commit}"); err != nil || fetched != preserved {
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the stranded pipeline commits could not be verified after anchoring; no files or refs were changed"), false
+	}
+	return State{}, true
 }
 
 func (s *Service) anchorReachablePreserved(ctx context.Context, state State, anchorRef, preserved string) (State, bool) {

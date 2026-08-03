@@ -510,9 +510,12 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 		// is referenced by nothing: the worktree is removed at the end of the
 		// run and the commits become unreachable, while branch_sync still
 		// verifies the preserved head against refs/heads/<branch> and refuses
-		// to return custody. Same adoption the fix steps already perform.
-		if _, err := git.Run(ctx, sctx.WorkDir, "update-ref", normalizedBranchRef(sctx.Run.Branch), headSHA); err != nil {
-			return nil, fmt.Errorf("update local branch ref after rebase: %w", err)
+		// to return custody. Same adoption the fix steps already perform, and
+		// the same compare-and-swap guard - this move is the one that rewrites
+		// the ref non-fast-forward, so an unanchored write here would destroy a
+		// commit a concurrent push landed on the branch.
+		if err := adoptBranchRef(sctx, headSHA); err != nil {
+			return nil, err
 		}
 		sctx.Run.HeadSHA = headSHA
 		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {

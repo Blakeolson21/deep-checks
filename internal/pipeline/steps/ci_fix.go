@@ -191,8 +191,8 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 		if err := persistBinding(); err != nil {
 			return false, err
 		}
-		if _, err := stepGitRun(sctx, "update-ref", ref, newHeadSHA); err != nil {
-			return false, fmt.Errorf("update local branch ref: %w", err)
+		if err := adoptBranchRef(sctx, newHeadSHA); err != nil {
+			return false, err
 		}
 		sctx.Run.HeadSHA = newHeadSHA
 		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, newHeadSHA); err != nil {
@@ -207,8 +207,8 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 		return false, err
 	}
 
-	if _, err := stepGitRun(sctx, "update-ref", ref, newHeadSHA); err != nil {
-		return false, fmt.Errorf("update local branch ref: %w", err)
+	if err := adoptBranchRef(sctx, newHeadSHA); err != nil {
+		return false, err
 	}
 	sctx.Run.HeadSHA = newHeadSHA
 	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, newHeadSHA); err != nil {

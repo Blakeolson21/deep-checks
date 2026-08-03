@@ -120,3 +120,58 @@ func writeFile(t *testing.T, dir, name, content string) {
 		t.Fatal(err)
 	}
 }
+
+// TestAdoptBranchRef_RefusesClobberingConcurrentPush pins the guard on the
+// shared branch-ref adoption. The rebase adoption rewrites refs/heads/<branch>
+// non-fast-forward by construction, so an unguarded write moves the branch back
+// onto a commit this run never saw and destroys whatever a second push landed
+// there - recreating the exact gate/head mismatch the adoption exists to
+// remove. Moves that lose nothing (ref already at the new head, ref behind it,
+// ref at the recorded head the rebase rewrites) must still go through.
+func TestAdoptBranchRef_RefusesClobberingConcurrentPush(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	// A second push lands on the branch while the run is still working.
+	writeFile(t, dir, "out-of-band.txt", "second push\n")
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "second push")
+	outOfBand := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "update-ref", "refs/heads/feature", outOfBand)
+
+	// The old run produces its own head from the submission it started on, so
+	// the head it wants to adopt does not contain the second push.
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+	writeFile(t, dir, "pipeline.txt", "pipeline\n")
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "pipeline commit")
+	pipelineHead := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	if err := adoptBranchRef(sctx, pipelineHead); err == nil {
+		t.Fatal("adoption clobbered a branch ref another push had already moved")
+	}
+	if got := gitCmd(t, dir, "rev-parse", "refs/heads/feature"); got != outOfBand {
+		t.Fatalf("branch ref = %s, want the untouched out-of-band head %s", got, outOfBand)
+	}
+
+	// The ordinary case - the ref at the recorded head the run started from -
+	// still adopts, and so does a ref the new head already contains.
+	gitCmd(t, dir, "update-ref", "refs/heads/feature", headSHA)
+	if err := adoptBranchRef(sctx, pipelineHead); err != nil {
+		t.Fatalf("adoption refused an unraced branch ref: %v", err)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "refs/heads/feature"); got != pipelineHead {
+		t.Fatalf("branch ref = %s, want the adopted pipeline head %s", got, pipelineHead)
+	}
+	gitCmd(t, dir, "update-ref", "refs/heads/feature", baseSHA)
+	if err := adoptBranchRef(sctx, pipelineHead); err != nil {
+		t.Fatalf("adoption refused a branch ref the new head already contains: %v", err)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "refs/heads/feature"); got != pipelineHead {
+		t.Fatalf("branch ref = %s, want the adopted pipeline head %s", got, pipelineHead)
+	}
+}

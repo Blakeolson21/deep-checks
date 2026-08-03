@@ -1693,3 +1693,240 @@ func TestRecoverGateAtSubmittedHeadIsBookkeepingNoOp(t *testing.T) {
 		t.Fatalf("re-recovery = %#v", state)
 	}
 }
+
+// newStrandedFixture builds the stranded custody state the frozen-gate branch
+// handles: the gate branch never moved past the submitted head, and the run
+// records a head that only the gate's object store still holds. The recorded
+// head is an agent-resolved rebase, so it carries merge decisions that exist in
+// no other commit - "the pipeline adopted nothing" must not be read as "nothing
+// is preservable".
+func newStrandedFixture(t *testing.T) *recoverFixture {
+	t.Helper()
+	ctx := context.Background()
+	root := t.TempDir()
+	remote := filepath.Join(root, "upstream.git")
+	mustRun(t, root, "init", "--bare", remote)
+
+	local := filepath.Join(root, "operator")
+	mustRun(t, root, "init", "-b", "main", local)
+	configureIdentity(t, local)
+	mustWrite(t, filepath.Join(local, "file.txt"), "base\n")
+	mustRun(t, local, "add", "file.txt")
+	mustRun(t, local, "commit", "-m", "base")
+	base := mustRun(t, local, "rev-parse", "HEAD")
+	mustRun(t, local, "checkout", "-b", "feature/recover")
+	mustWrite(t, filepath.Join(local, "file.txt"), "feature\n")
+	mustRun(t, local, "commit", "-am", "feature")
+	submitted := mustRun(t, local, "rev-parse", "HEAD")
+
+	gate := filepath.Join(root, "gate.git")
+	mustRun(t, root, "init", "--bare", gate)
+	mustRun(t, local, "push", gate, "refs/heads/feature/recover:refs/heads/feature/recover")
+
+	// The pipeline's DETACHED worktree of the gate produces the recorded head
+	// and adopts it on no ref; the worktree is removed with the run, so the
+	// commit survives only as an unreferenced object in the gate.
+	wt := filepath.Join(root, "pipeline-wt")
+	mustRun(t, gate, "worktree", "add", "--detach", wt, submitted)
+	configureIdentity(t, wt)
+	mustWrite(t, filepath.Join(wt, "file.txt"), "feature, conflict resolved by the agent\n")
+	mustRun(t, wt, "commit", "-am", "no-mistakes(rebase): resolve conflicts")
+	recorded := mustRun(t, wt, "rev-parse", "HEAD")
+	mustRun(t, gate, "worktree", "remove", "--force", wt)
+
+	database, err := db.Open(filepath.Join(root, "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	repo, err := database.InsertRepo(local, remote, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature/recover", submitted, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunHeadSHA(run.ID, recorded); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+	run, _ = database.GetRun(run.ID)
+	return &recoverFixture{
+		t: t, ctx: ctx, db: database, repo: repo, run: run,
+		service: &Service{DB: database, Repo: repo, WorkDir: local, GateDir: gate},
+		local:   local, gate: gate, remote: remote,
+		base: base, submitted: submitted, preserved: recorded,
+	}
+}
+
+// TestRecoverStrandedHeadIsPreservedNotAssumedAway pins the honesty half of the
+// frozen-gate custody return: a gate that never moved past the submitted head
+// proves the pipeline ADOPTED nothing, not that nothing is PRESERVABLE. An
+// agent-resolved rebase records merge decisions that exist in no other commit,
+// so when the gate's object store still holds that stranded head the recovery
+// must anchor it before stamping custody.
+func TestRecoverStrandedHeadIsPreservedNotAssumedAway(t *testing.T) {
+	f := newStrandedFixture(t)
+
+	state := f.service.Recover(f.ctx, false)
+	if !state.Recovered {
+		t.Fatalf("recover refused: safety = %s error = %q", state.Safety, state.Error)
+	}
+	if state.Changed {
+		t.Fatal("bookkeeping recovery reported a worktree change")
+	}
+	if got := mustRun(t, f.local, "rev-parse", f.anchorRef()); got != f.preserved {
+		t.Fatalf("anchor ref = %s, want the stranded pipeline head %s", got, f.preserved)
+	}
+	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != f.submitted {
+		t.Fatal("recovery mutated the operator worktree")
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != f.submitted {
+		t.Fatal("recovery mutated the gate branch")
+	}
+	// The staging ref used to hand the commit across must never be left behind.
+	if _, err := gitpkg.Run(f.ctx, f.gate, "rev-parse", "--verify", "refs/no-mistakes/custody-anchor/"+f.run.ID); err == nil {
+		t.Fatal("gate staging ref survived the recovery")
+	}
+	if !f.custodyReturned() {
+		t.Fatal("custody was not stamped")
+	}
+}
+
+// TestRecoverStrandedHeadKeepLocalEscapesDivergedLocal closes the residual
+// deadlock: when the operator amended or reset while trying to get unstuck, the
+// local branch no longer contains the submitted head the gate is frozen at, and
+// the gate never held the recorded head, so no verification path can ever
+// succeed. --keep-local is the explicit escape and must work for this class.
+func TestRecoverStrandedHeadKeepLocalEscapesDivergedLocal(t *testing.T) {
+	f := newStrandedFixture(t)
+	mustRun(t, f.local, "reset", "--hard", f.base)
+	mustWrite(t, filepath.Join(f.local, "file.txt"), "feature, reworked locally\n")
+	mustRun(t, f.local, "commit", "-am", "reworked feature")
+	divergedHead := mustRun(t, f.local, "rev-parse", "HEAD")
+
+	refused := f.service.Recover(f.ctx, false)
+	if refused.Recovered {
+		t.Fatalf("default recovery returned custody over a head the operator does not have: %#v", refused)
+	}
+	if !strings.Contains(refused.Error, "--keep-local") {
+		t.Fatalf("refusal is not actionable: %q", refused.Error)
+	}
+	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != divergedHead {
+		t.Fatal("refusal mutated the operator worktree")
+	}
+	if f.custodyReturned() {
+		t.Fatal("refusal stamped custody")
+	}
+
+	kept := f.service.Recover(f.ctx, true)
+	if !kept.Recovered || kept.Changed {
+		t.Fatalf("keep-local recover = %#v", kept)
+	}
+	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != divergedHead {
+		t.Fatal("keep-local moved the worktree")
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != divergedHead {
+		t.Fatalf("gate branch = %s, want the kept local head %s", got, divergedHead)
+	}
+	if got := mustRun(t, f.local, "rev-parse", f.anchorRef()); got != f.preserved {
+		t.Fatal("keep-local lost the stranded pipeline head")
+	}
+	if !f.custodyReturned() {
+		t.Fatal("keep-local did not stamp custody")
+	}
+}
+
+// TestRecoverRebasedPipelineHeadReturnsCustody covers the intent's headline
+// scenario end to end now that the rebase step adopts its head on the gate
+// branch: the preserved head is the submission replayed onto a newer base, so
+// it is diverged from the local head by construction and no fast-forward can
+// ever apply. Because the replay provably carries every local change, custody
+// returns at the preserved head instead of demanding a manual reconcile, and
+// the pre-recovery local head is anchored first.
+func TestRecoverRebasedPipelineHeadReturnsCustody(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	remote := filepath.Join(root, "upstream.git")
+	mustRun(t, root, "init", "--bare", remote)
+
+	local := filepath.Join(root, "operator")
+	mustRun(t, root, "init", "-b", "main", local)
+	configureIdentity(t, local)
+	mustWrite(t, filepath.Join(local, "file.txt"), "base\n")
+	mustRun(t, local, "add", "file.txt")
+	mustRun(t, local, "commit", "-m", "base")
+	base := mustRun(t, local, "rev-parse", "HEAD")
+	mustRun(t, local, "checkout", "-b", "feature/recover")
+	mustWrite(t, filepath.Join(local, "file.txt"), "feature\n")
+	mustRun(t, local, "commit", "-am", "feature")
+	submitted := mustRun(t, local, "rev-parse", "HEAD")
+
+	// main advances after submission, so the pipeline rebases the branch.
+	mustRun(t, local, "checkout", "main")
+	mustWrite(t, filepath.Join(local, "other.txt"), "other\n")
+	mustRun(t, local, "add", "other.txt")
+	mustRun(t, local, "commit", "-m", "main advances")
+
+	gate := filepath.Join(root, "gate.git")
+	mustRun(t, root, "init", "--bare", gate)
+	mustRun(t, local, "push", gate, "refs/heads/main:refs/heads/main", "refs/heads/feature/recover:refs/heads/feature/recover")
+	mustRun(t, local, "checkout", "feature/recover")
+
+	wt := filepath.Join(root, "pipeline-wt")
+	mustRun(t, gate, "worktree", "add", "--detach", wt, submitted)
+	configureIdentity(t, wt)
+	mustRun(t, wt, "rebase", "refs/heads/main")
+	rebased := mustRun(t, wt, "rev-parse", "HEAD")
+	// The rebase step's adoption: the rebased head reaches the gate branch ref.
+	mustRun(t, gate, "update-ref", "refs/heads/feature/recover", rebased)
+	mustRun(t, gate, "worktree", "remove", "--force", wt)
+
+	database, err := db.Open(filepath.Join(root, "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	repo, err := database.InsertRepo(local, remote, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature/recover", submitted, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunHeadSHA(run.ID, rebased); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{DB: database, Repo: repo, WorkDir: local, GateDir: gate}
+
+	state := service.Recover(ctx, false)
+	if !state.Recovered {
+		t.Fatalf("recover refused the rebased pipeline head: safety = %s error = %q", state.Safety, state.Error)
+	}
+	if !state.Changed {
+		t.Fatal("equivalent advance did not report the worktree move")
+	}
+	if got := mustRun(t, local, "rev-parse", "HEAD"); got != rebased {
+		t.Fatalf("local HEAD = %s, want the preserved rebased head %s", got, rebased)
+	}
+	if got := mustRun(t, local, "rev-parse", "refs/no-mistakes/sync-anchor/"+run.ID); got != submitted {
+		t.Fatalf("pre-recovery local head anchor = %s, want %s", got, submitted)
+	}
+	if got := mustRun(t, local, "rev-parse", "refs/no-mistakes/recover/"+run.ID); got != rebased {
+		t.Fatalf("preserved anchor = %s, want %s", got, rebased)
+	}
+	if got := readOptional(t, filepath.Join(local, "other.txt")); got != "other\n" {
+		t.Fatalf("recovered worktree is missing the rebased content: %q", got)
+	}
+	reloaded, err := database.GetRun(run.ID)
+	if err != nil || reloaded == nil || reloaded.CustodyReturnedAt == nil {
+		t.Fatalf("custody was not stamped: %#v, %v", reloaded, err)
+	}
+}
