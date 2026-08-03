@@ -1835,8 +1835,39 @@ func TestRecoverStrandedHeadKeepLocalEscapesDivergedLocal(t *testing.T) {
 	if got := mustRun(t, f.local, "rev-parse", f.anchorRef()); got != f.preserved {
 		t.Fatal("keep-local lost the stranded pipeline head")
 	}
+	// The CAS moved the gate off the submitted head, and the kept local head
+	// does not contain it: that commit must be anchored, not left referenced by
+	// nothing. The stranded-head anchor does not cover it - they are different
+	// commits here, which is exactly what makes this caller different.
+	if got := mustRun(t, f.local, "rev-parse", "refs/no-mistakes/recover-abandoned/"+f.run.ID); got != f.submitted {
+		t.Fatalf("abandoned-head anchor = %s, want the submitted head %s", got, f.submitted)
+	}
 	if !f.custodyReturned() {
 		t.Fatal("keep-local did not stamp custody")
+	}
+}
+
+// TestRecoverKeepLocalDoesNotAnchorAContainedGateHead keeps the abandonment
+// anchor honest in the other direction: when the kept local head already
+// contains the gate head, or the recover anchor already pins it, nothing is
+// being let go and no extra private ref may be left behind.
+func TestRecoverKeepLocalDoesNotAnchorAContainedGateHead(t *testing.T) {
+	f := newRecoverFixture(t, types.RunCancelled)
+	mustWrite(t, filepath.Join(f.local, "rescope.txt"), "rescope\n")
+	mustRun(t, f.local, "add", "rescope.txt")
+	mustRun(t, f.local, "commit", "-m", "diverging rescope")
+
+	kept := f.service.Recover(f.ctx, true)
+	if !kept.Recovered {
+		t.Fatalf("keep-local recover = %#v", kept)
+	}
+	// gateHead == preserved for this fixture, and the recover anchor already
+	// pins it, so the abandonment anchor is redundant and must not be written.
+	if got := mustRun(t, f.local, "rev-parse", f.anchorRef()); got != f.preserved {
+		t.Fatalf("recover anchor = %s, want %s", got, f.preserved)
+	}
+	if _, err := gitpkg.Run(f.ctx, f.local, "rev-parse", "--verify", "refs/no-mistakes/recover-abandoned/"+f.run.ID); err == nil {
+		t.Fatal("wrote a redundant abandonment anchor for an already-pinned gate head")
 	}
 }
 

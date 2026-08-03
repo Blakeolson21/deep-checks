@@ -210,13 +210,14 @@ For equal or ahead worktrees where the preserved head is already locally reachab
 For behind or diverged worktrees, recovery verifies the preserved head at the local gate branch and fetches it into the anchor before moving or refusing.
 A clean behind worktree fast-forwards.
 A diverged worktree is adopted only when the preserved head provably carries every local change, proven by an executable three-way merge whose result is exactly the preserved head's tree.
-This covers a pipeline rebase onto a newer base once a later pipeline commit has also advanced the gate branch to the preserved head.
-A rebase-only cancelled run can still refuse recovery because its detached worktree advances the recorded run head without advancing that gate branch; use `no-mistakes rerun` in that case.
+This covers a pipeline rebase onto a newer base: the rebase step adopts its rebased head on the gate branch ref, so the gate holds the preserved head for recovery to verify.
+A gate branch still frozen at the run's submitted head (a run recorded before that adoption existed) is the one case where the preserved head reached no ref and cannot be fetched: recovery anchors it when the gate object store or your worktree still holds the commit, and returns custody with no anchor only when the commit is genuinely gone.
 That adoption anchors the pre-recovery local head under `refs/no-mistakes/recover-local/<run>`, then moves the branch with Git operations that refuse on their own rather than after a preceding check: an atomic compare-and-swap on the branch ref, and a working-tree update that aborts instead of overwriting a modified or untracked file.
 The proof is deliberately narrow and never uses patch identity, which discards hunk locations and whitespace and so cannot tell a genuine replay from a same-shaped edit elsewhere.
 Anything it cannot decide - unlanded local commits, or a rebase whose fix rounds also rewrote your own lines - still refuses with the anchor named, because only escalation can tell a deliberate pipeline fix apart from a dropped change.
 A dirty worktree refuses with explicit choices.
 When you explicitly keep a behind or diverged local head instead of taking the preserved head, `--keep-local` returns custody at the current head without touching the worktree and atomically points the gate branch at it, so a concurrent gate push wins and the recovery refuses instead.
+Unless your kept head already contains it, the commit the gate branch is moved off is anchored under `refs/no-mistakes/recover-abandoned/<run>` first.
 `no-mistakes rerun` is the alternative exit that resumes validating the preserved head instead of taking the branch back.
 A recovered never-pushed run reports `state: custody_returned`; a recovered pushed run reports its ordinary classification against the last push binding, typically `local_ahead`.
 On a `user_owned` branch, `--recover` is an idempotent no-op success: nothing pipeline-created exists to recover, and no file, ref, or database row changes.

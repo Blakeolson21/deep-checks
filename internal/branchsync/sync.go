@@ -701,8 +701,19 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 // an atomic compare-and-swap so a concurrent gate push refuses instead of
 // being clobbered. The kept head's objects reach the gate through a gate-side
 // fetch - never a push, which would fire the gate's receive hooks and start a
-// pipeline run. The preserved head stays reachable through the anchor ref.
+// pipeline run.
+//
+// The commit the compare-and-swap abandons is anchored first, here rather than
+// in each caller. For the ordinary caller the gate head IS the preserved head
+// already pinned at the recover anchor, but when the gate is frozen at the
+// submitted head the two are different commits, and moving the branch off a
+// submitted head the kept local head does not contain would leave it referenced
+// by nothing. "Provably safe before custody moves" has to hold for whichever
+// commit is actually being let go.
 func (s *Service) recoverKeepLocal(ctx context.Context, run *db.Run, state State, gateHead string) State {
+	if blocked, ok := s.anchorAbandonedGateHead(ctx, state, run.ID, gateHead); !ok {
+		return blocked
+	}
 	if s.beforeGateReset != nil {
 		s.beforeGateReset()
 	}
@@ -968,6 +979,43 @@ func (s *Service) anchorStrandedPipelineHead(ctx context.Context, state State, r
 	return State{}, true
 }
 
+// anchorAbandonedGateHead pins the gate branch head that a keep-local custody
+// return is about to move away from, unless the kept local head already
+// contains it or the recover anchor already pins it. The gate always has the
+// commit (it is the branch head that was just read), so unlike the stranded
+// pipeline head there is no "already gone" case: failing to anchor refuses.
+func (s *Service) anchorAbandonedGateHead(ctx context.Context, state State, runID, gateHead string) (State, bool) {
+	wd := s.workDir()
+	local := state.Local.Head
+	if strings.TrimSpace(gateHead) == "" || gateHead == local || isAncestor(ctx, wd, gateHead, local) {
+		return State{}, true
+	}
+	if existing, err := git.Run(ctx, wd, "rev-parse", recoverAnchorRef(runID)+"^{commit}"); err == nil && existing == gateHead {
+		return State{}, true
+	}
+	ref := recoverAbandonedAnchorRef(runID)
+	if existing, err := git.Run(ctx, wd, "rev-parse", ref+"^{commit}"); err == nil && existing == gateHead {
+		return State{}, true
+	}
+	if objectExists(ctx, wd, gateHead) {
+		if _, err := git.Run(ctx, wd, "update-ref", ref, gateHead); err != nil {
+			return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the gate branch head this recovery would abandon could not be anchored locally; no files or refs were changed"), false
+		}
+	} else {
+		gateDir := strings.TrimSpace(s.GateDir)
+		if gateDir == "" {
+			return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the gate branch head this recovery would abandon is not available locally and no gate is configured to fetch it from; no files or refs were changed"), false
+		}
+		if err := git.FetchRemoteBranchToPrivateRef(ctx, wd, gateDir, state.Local.Branch, ref); err != nil {
+			return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the gate branch head this recovery would abandon could not be fetched from the local gate; no files or refs were changed"), false
+		}
+	}
+	if anchored, err := git.Run(ctx, wd, "rev-parse", ref+"^{commit}"); err != nil || anchored != gateHead {
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the gate branch head this recovery would abandon could not be verified after anchoring; no files or refs were changed"), false
+	}
+	return State{}, true
+}
+
 func (s *Service) anchorReachablePreserved(ctx context.Context, state State, anchorRef, preserved string) (State, bool) {
 	if _, err := git.Run(ctx, s.workDir(), "update-ref", anchorRef, preserved); err != nil {
 		return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the preserved pipeline commits could not be anchored locally; no files or refs were changed"), false
@@ -1004,6 +1052,12 @@ func recoverAnchorRef(runID string) string {
 // leaves those SHAs unreferenced by the branch.
 func recoverLocalAnchorRef(runID string) string {
 	return "refs/no-mistakes/recover-local/" + runID
+}
+
+// recoverAbandonedAnchorRef keeps the gate head that a keep-local custody
+// return moves the gate branch away from reachable in the invoking repository.
+func recoverAbandonedAnchorRef(runID string) string {
+	return "refs/no-mistakes/recover-abandoned/" + runID
 }
 
 func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
