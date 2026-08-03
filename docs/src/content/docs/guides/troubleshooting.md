@@ -83,7 +83,7 @@ If you have multiple installs with different `NM_HOME` roots, each gets its own 
 
 Symptom: the command refuses because active pipeline runs are in progress and lists them.
 
-`daemon stop` and `daemon restart` both refuse by default while pipeline runs are active and list the affected runs; [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the guard's exact rules, including the `--force` override each command takes.
+`daemon stop` and `daemon restart` both refuse by default while pipeline runs are active and list the affected runs; [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the guard's exact rules, including the `--force` override each command takes and why `--force` does not cover a run that is executing a step.
 
 `no-mistakes update` is not a way around a stale install here: self-update is disabled in this build, and the [CLI reference](/no-mistakes/reference/cli/#no-mistakes-update) owns the rebuild-from-source path that replaces it.
 
@@ -99,6 +99,8 @@ Only when you have confirmed it is acceptable for every remaining listed active 
 ```sh
 no-mistakes daemon restart --force
 ```
+
+If the refusal reports a run as `executing` a step, `--force` will not clear it. Wait for that step to finish or park at a gate, or end the run with `no-mistakes axi abort --run <id>`.
 
 ## Agent binary not detected
 
@@ -297,7 +299,7 @@ no-mistakes daemon start
 ```
 
 This keeps your gate repos, database, and config but clears transient state. For a full wipe, see the [Uninstall section](/no-mistakes/start-here/installation/#uninstall).
-Wedged state often means a run is stuck `pending` or `running`, so `daemon stop` refuses without `--force`; only force through once you've confirmed it's fine for the listed runs to fail.
+Wedged state often means a run is stuck `pending` or `running`, so `daemon stop` refuses without `--force`; only force through once you've confirmed it's fine for the listed runs to fail. A run the daemon is still executing needs `--abandon-executing-runs` instead, which is rarely what wedged state calls for.
 
 ## Still stuck
 

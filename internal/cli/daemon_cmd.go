@@ -279,17 +279,18 @@ func newDaemonStartCmd() *cobra.Command {
 
 func newDaemonStopCmd() *cobra.Command {
 	var force bool
+	var abandonExecuting bool
 	cmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Stop the running daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			logLifecycleInvocation("daemon.stop", force)
+			logLifecycleInvocation("daemon.stop", force || abandonExecuting)
 			return trackCommand("daemon.stop", func() error {
 				p, err := paths.New()
 				if err != nil {
 					return err
 				}
-				if err := guardDestructiveDaemonLifecycle(p, cmd.ErrOrStderr(), "daemon stop", force); err != nil {
+				if err := guardDestructiveDaemonLifecycle(p, cmd.ErrOrStderr(), "daemon stop", force, abandonExecuting); err != nil {
 					return err
 				}
 				if err := daemonStopFn(p); err != nil {
@@ -300,17 +301,19 @@ func newDaemonStopCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().BoolVar(&force, "force", false, "stop the daemon even when pipeline runs are active")
+	cmd.Flags().BoolVar(&force, "force", false, "stop the daemon even when parked or idle pipeline runs exist")
+	cmd.Flags().BoolVar(&abandonExecuting, "abandon-executing-runs", false, "also stop the daemon while a run is executing a step, failing that run")
 	return cmd
 }
 
 func newDaemonRestartCmd() *cobra.Command {
 	var force bool
+	var abandonExecuting bool
 	cmd := &cobra.Command{
 		Use:   "restart",
 		Short: "Restart the daemon (stop if running, then start)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			logLifecycleInvocation("daemon.restart", force)
+			logLifecycleInvocation("daemon.restart", force || abandonExecuting)
 			return trackCommand("daemon.restart", func() error {
 				p, err := paths.New()
 				if err != nil {
@@ -319,7 +322,7 @@ func newDaemonRestartCmd() *cobra.Command {
 				if err := p.EnsureDirs(); err != nil {
 					return err
 				}
-				if err := guardDestructiveDaemonLifecycle(p, cmd.ErrOrStderr(), "daemon restart", force); err != nil {
+				if err := guardDestructiveDaemonLifecycle(p, cmd.ErrOrStderr(), "daemon restart", force, abandonExecuting); err != nil {
 					return err
 				}
 				if err := daemonStopFn(p); err != nil {
@@ -333,24 +336,51 @@ func newDaemonRestartCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().BoolVar(&force, "force", false, "restart the daemon even when pipeline runs are active")
+	cmd.Flags().BoolVar(&force, "force", false, "restart the daemon even when parked or idle pipeline runs exist")
+	cmd.Flags().BoolVar(&abandonExecuting, "abandon-executing-runs", false, "also restart the daemon while a run is executing a step, failing that run")
 	return cmd
 }
 
-func guardDestructiveDaemonLifecycle(p *paths.Paths, stderr io.Writer, action string, force bool) error {
-	runs, err := lifecycle.ActiveRuns(p)
+// guardDestructiveDaemonLifecycle refuses to stop or restart the daemon while
+// pipeline runs are active, in two tiers.
+//
+// --force covers runs that survive a daemon stop: a run parked at a gate is
+// resumed by startup recovery, and an idle row was never in flight. It does
+// not cover a run executing a step, because stopping the daemon cancels that
+// step, fails the run, and strands its pipeline commits in the local gate.
+// That case needs --abandon-executing-runs, which says what it costs.
+func guardDestructiveDaemonLifecycle(p *paths.Paths, stderr io.Writer, action string, force, abandonExecuting bool) error {
+	// A health probe that errors has not proven the daemon is down. Assume it
+	// is up so runs are classified on their own evidence rather than written
+	// off as idle: this guard's job is to fail closed.
+	alive, err := daemonIsRunningFn(p)
+	if err != nil {
+		alive = true
+	}
+	runs, err := lifecycle.ClassifyActiveRuns(p, alive)
 	if err != nil {
 		return fmt.Errorf("check active pipeline runs: %w", err)
 	}
 	if len(runs) == 0 {
 		return nil
 	}
-	if force {
+	if executing := lifecycle.ExecutingRuns(runs); len(executing) > 0 && !abandonExecuting {
+		return fmt.Errorf("refusing %s because %d active pipeline %s executing a step right now; --force does not cover executing runs, because stopping the daemon cancels the step and strands the run's pipeline commits in the local gate. Wait for the step to finish or park at a gate, end the run with `no-mistakes axi abort --run <id>`, or pass --abandon-executing-runs to fail it deliberately\n%s",
+			action, len(executing), runNoun(len(executing)), lifecycle.ExecutingRunList(executing))
+	}
+	if force || abandonExecuting {
 		fmt.Fprintf(stderr, "FORCE: %s will stop/restart the daemon while %d active pipeline runs are in progress\n", action, len(runs))
-		fmt.Fprint(stderr, lifecycle.RunList(runs))
+		fmt.Fprint(stderr, lifecycle.ActiveRunList(runs))
 		return nil
 	}
-	return fmt.Errorf("refusing %s because %d active pipeline runs are in progress; pass --force to stop/restart the daemon anyway\n%s", action, len(runs), lifecycle.RunList(runs))
+	return fmt.Errorf("refusing %s because %d active pipeline runs are in progress; pass --force to stop/restart the daemon anyway\n%s", action, len(runs), lifecycle.ActiveRunList(runs))
+}
+
+func runNoun(count int) string {
+	if count == 1 {
+		return "run is"
+	}
+	return "runs are"
 }
 
 func newDaemonStatusCmd() *cobra.Command {

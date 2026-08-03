@@ -468,11 +468,12 @@ Stop the running daemon process.
 ```sh
 no-mistakes daemon stop
 no-mistakes daemon stop --force
+no-mistakes daemon stop --abandon-executing-runs
 ```
 
 [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping)
-owns the active-run guard, the scope of `--force`, and recursive
-validation-step containment.
+owns the active-run guard, the scope of `--force`, why it does not cover a run
+that is executing a step, and recursive validation-step containment.
 
 This does not remove the managed service. A later `no-mistakes`, `no-mistakes daemon start`, `init`, `attach`, or `rerun` can start the daemon again through the same service manager when available, or as a detached daemon otherwise.
 
@@ -483,12 +484,13 @@ Restart the daemon.
 ```sh
 no-mistakes daemon restart
 no-mistakes daemon restart --force
+no-mistakes daemon restart --abandon-executing-runs
 ```
 
 Stops the current daemon and starts it again. This works whether the daemon is currently running or not.
 [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping)
-owns the active-run guard, the scope of `--force`, and recursive
-validation-step containment.
+owns the active-run guard, the scope of `--force`, why it does not cover a run
+that is executing a step, and recursive validation-step containment.
 
 ## no-mistakes daemon status
 

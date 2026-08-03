@@ -187,3 +187,186 @@ func createLifecycleGuardRuns(t *testing.T, p *paths.Paths) {
 		t.Fatalf("mark running: %v", err)
 	}
 }
+
+// A run that is executing a step is the case --force must not cover: stopping
+// the daemon cancels the step and strands the run's pipeline commits in the
+// local gate. Regression for the 2026-08-02 cutover incident, where
+// `daemon stop --force` killed a run mid-test-step.
+func TestDaemonStopForceRefusesRunExecutingAStep(t *testing.T) {
+	nmHome := t.TempDir()
+	t.Setenv("NM_HOME", nmHome)
+	seedLifecycleRunAtStep(t, paths.WithRoot(nmHome), "feature-executing", types.StepTest, types.StepStatusRunning)
+	stubDaemonAlive(t)
+	stopCalled := stubDaemonStop(t)
+
+	out, err := executeCmd("daemon", "stop", "--force")
+	if err == nil {
+		t.Fatal("daemon stop --force should refuse while a run is executing a step")
+	}
+	if *stopCalled {
+		t.Fatal("daemon stop --force should not stop the daemon while a run is executing a step")
+	}
+	for _, want := range []string{
+		"refusing daemon stop",
+		"executing a step",
+		"feature-executing",
+		"step=test",
+		"--abandon-executing-runs",
+	} {
+		if !strings.Contains(out+err.Error(), want) {
+			t.Fatalf("executing-run refusal should contain %q, got output %q error %v", want, out, err)
+		}
+	}
+}
+
+func TestDaemonRestartForceRefusesRunExecutingAStep(t *testing.T) {
+	nmHome := t.TempDir()
+	t.Setenv("NM_HOME", nmHome)
+	seedLifecycleRunAtStep(t, paths.WithRoot(nmHome), "feature-executing", types.StepReview, types.StepStatusFixing)
+	stubDaemonAlive(t)
+	stopCalled := stubDaemonStop(t)
+	startCalled := false
+	prevStart := daemonStartFn
+	daemonStartFn = func(*paths.Paths) error {
+		startCalled = true
+		return nil
+	}
+	t.Cleanup(func() { daemonStartFn = prevStart })
+
+	out, err := executeCmd("daemon", "restart", "--force")
+	if err == nil {
+		t.Fatal("daemon restart --force should refuse while a run is executing a step")
+	}
+	if *stopCalled || startCalled {
+		t.Fatal("daemon restart --force should not touch the daemon while a run is executing a step")
+	}
+	if !strings.Contains(out+err.Error(), "refusing daemon restart") {
+		t.Fatalf("restart refusal missing, got output %q error %v", out, err)
+	}
+}
+
+// The cutover case --force exists for: a run parked at a gate keeps
+// status=running for as long as the agent takes to answer, and startup
+// recovery resumes it, so stopping the daemon is recoverable.
+func TestDaemonStopForceAllowsRunParkedAtAGate(t *testing.T) {
+	nmHome := t.TempDir()
+	t.Setenv("NM_HOME", nmHome)
+	seedLifecycleRunAtStep(t, paths.WithRoot(nmHome), "feature-parked", types.StepReview, types.StepStatusAwaitingApproval)
+	stubDaemonAlive(t)
+	stopCalled := stubDaemonStop(t)
+
+	out, err := executeCmd("daemon", "stop", "--force")
+	if err != nil {
+		t.Fatalf("daemon stop --force should proceed for a parked run, got %v (output %q)", err, out)
+	}
+	if !*stopCalled {
+		t.Fatal("daemon stop --force should stop the daemon for a parked run")
+	}
+	if !strings.Contains(out, "parked") {
+		t.Fatalf("force warning should report the run as parked, got %q", out)
+	}
+}
+
+func TestDaemonStopAbandonExecutingRunsOverridesExecutingGuard(t *testing.T) {
+	nmHome := t.TempDir()
+	t.Setenv("NM_HOME", nmHome)
+	seedLifecycleRunAtStep(t, paths.WithRoot(nmHome), "feature-executing", types.StepTest, types.StepStatusRunning)
+	stubDaemonAlive(t)
+	stopCalled := stubDaemonStop(t)
+
+	out, err := executeCmd("daemon", "stop", "--abandon-executing-runs")
+	if err != nil {
+		t.Fatalf("--abandon-executing-runs should proceed, got %v (output %q)", err, out)
+	}
+	if !*stopCalled {
+		t.Fatal("--abandon-executing-runs should stop the daemon")
+	}
+	if !strings.Contains(out, "FORCE: daemon stop") {
+		t.Fatalf("--abandon-executing-runs should log the force warning, got %q", out)
+	}
+}
+
+// With no daemon serving this NM_HOME nothing can be mid-step, so leftover
+// rows must not escalate into the executing refusal.
+func TestDaemonStopForceAllowsLeftoverRunsWhenDaemonIsDown(t *testing.T) {
+	nmHome := t.TempDir()
+	t.Setenv("NM_HOME", nmHome)
+	seedLifecycleRunAtStep(t, paths.WithRoot(nmHome), "feature-stale", types.StepTest, types.StepStatusRunning)
+	prev := daemonIsRunningFn
+	daemonIsRunningFn = func(*paths.Paths) (bool, error) { return false, nil }
+	t.Cleanup(func() { daemonIsRunningFn = prev })
+	stopCalled := stubDaemonStop(t)
+
+	out, err := executeCmd("daemon", "stop", "--force")
+	if err != nil {
+		t.Fatalf("daemon stop --force should proceed when the daemon is down, got %v (output %q)", err, out)
+	}
+	if !*stopCalled {
+		t.Fatal("daemon stop --force should stop the daemon when only leftover rows exist")
+	}
+}
+
+func stubDaemonAlive(t *testing.T) {
+	t.Helper()
+	prev := daemonIsRunningFn
+	daemonIsRunningFn = func(*paths.Paths) (bool, error) { return true, nil }
+	t.Cleanup(func() { daemonIsRunningFn = prev })
+}
+
+func stubDaemonStop(t *testing.T) *bool {
+	t.Helper()
+	called := false
+	prev := daemonStopFn
+	daemonStopFn = func(*paths.Paths) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() { daemonStopFn = prev })
+	return &called
+}
+
+// seedLifecycleRunAtStep inserts one running run whose step is left in status,
+// which is how the guard tells an executing run from a parked one.
+func seedLifecycleRunAtStep(t *testing.T, p *paths.Paths, branch string, step types.StepName, status types.StepStatus) {
+	t.Helper()
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+	repo, err := database.InsertRepo("/tmp/project", "git@github.com:user/project.git", "main")
+	if err != nil {
+		t.Fatalf("insert repo: %v", err)
+	}
+	run, err := database.InsertRun(repo.ID, branch, "ccc333", "000")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatalf("mark run running: %v", err)
+	}
+	sr, err := database.InsertStepResult(run.ID, step)
+	if err != nil {
+		t.Fatalf("insert step result: %v", err)
+	}
+	switch status {
+	case types.StepStatusAwaitingApproval, types.StepStatusFixReview:
+		if err := database.ParkStepForApproval(run.ID, sr.ID, status, 0, nil); err != nil {
+			t.Fatalf("park step: %v", err)
+		}
+	case types.StepStatusRunning:
+		if err := database.StartStep(sr.ID); err != nil {
+			t.Fatalf("start step: %v", err)
+		}
+	default:
+		if err := database.StartStep(sr.ID); err != nil {
+			t.Fatalf("start step: %v", err)
+		}
+		if err := database.UpdateStepStatus(sr.ID, status); err != nil {
+			t.Fatalf("set step status: %v", err)
+		}
+	}
+}

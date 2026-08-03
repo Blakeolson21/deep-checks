@@ -52,7 +52,12 @@ no-mistakes axi respond
 
 `no-mistakes update` never resets the daemon in this build, because self-update is disabled and the binary is never replaced. After rebuilding from source, run `no-mistakes daemon restart` yourself; the [CLI reference](/no-mistakes/reference/cli/#no-mistakes-update) owns why the command is disabled.
 
-`no-mistakes daemon stop` and `no-mistakes daemon restart` guard against active work: if pending or running pipeline runs exist, each refuses by default, prints each active run's ID, status, branch, and short head SHA, and takes its own `--force` to proceed anyway.
+`no-mistakes daemon stop` and `no-mistakes daemon restart` guard against active work in two tiers. If pending or running pipeline runs exist, each refuses by default and prints every active run's ID, status, branch, short head SHA, and what the daemon is doing with it: `executing` a step, `parked` at a gate awaiting the driving agent, or `idle`. Each takes its own `--force` to proceed past parked and idle runs, both of which survive a stop, because crash recovery resumes a parked gate and an idle row was never in flight.
+
+`--force` deliberately does not cover a run that is executing a step. Stopping the daemon cancels the step, fails the run, and leaves its pipeline commits stranded in the local gate repo, so forcing past it destroys work that no restart brings back. Each command takes a separate `--abandon-executing-runs` for that case, which implies `--force`. Prefer waiting for the step to finish or park at a gate, or ending the run explicitly with `no-mistakes axi abort --run <id>`, which takes it terminal cleanly instead of failing it mid-step.
+
+A run counts as executing whenever a daemon is serving this `NM_HOME` and the run is not positively parked or idle, which includes the moment between two steps. When no daemon is serving it, nothing can be mid-step and every remaining active row counts as idle.
+
 That `--force` override is available only to an ordinary top-level caller. A
 process descended from an active validation-step agent cannot start, stop,
 restart, or update the daemon; recursive containment refuses the command before
