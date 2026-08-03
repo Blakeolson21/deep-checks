@@ -1871,6 +1871,75 @@ func TestRecoverKeepLocalDoesNotAnchorAContainedGateHead(t *testing.T) {
 	}
 }
 
+// TestRecoverKeepLocalRefusalLeavesNoAnchorBehind keeps the "a refusal changes
+// nothing" promise literal. The abandonment anchor may only be written once the
+// recovery is actually about to move the gate branch: a refusal that still
+// reports "no files or refs were changed" while a recover-abandoned ref sits in
+// the repository is indistinguishable from one a successful recovery wrote, and
+// the operator cannot tell whether the recovery ran.
+func TestRecoverKeepLocalRefusalLeavesNoAnchorBehind(t *testing.T) {
+	f := newStrandedFixture(t)
+	mustRun(t, f.local, "reset", "--hard", f.base)
+	mustWrite(t, filepath.Join(f.local, "file.txt"), "feature, reworked locally\n")
+	mustRun(t, f.local, "commit", "-am", "reworked feature")
+
+	f.service.beforeGateReset = func() {
+		mustWrite(t, filepath.Join(f.local, "file.txt"), "reworked again\n")
+		mustRun(t, f.local, "commit", "-am", "operator moved the branch again")
+	}
+	state := f.service.Recover(f.ctx, true)
+	if state.Recovered || state.Safety != "blocked_recover_assumptions_changed" {
+		t.Fatalf("keep-local recover with a moving local head = %#v", state)
+	}
+	if !strings.Contains(state.Error, "no files or refs were changed") {
+		t.Fatalf("refusal does not claim it changed nothing: %q", state.Error)
+	}
+	if _, err := gitpkg.Run(f.ctx, f.local, "rev-parse", "--verify", "refs/no-mistakes/recover-abandoned/"+f.run.ID); err == nil {
+		t.Fatal("a refusal that promised it changed nothing left an abandonment anchor behind")
+	}
+	if f.custodyReturned() {
+		t.Fatal("refusal stamped custody")
+	}
+}
+
+// TestRecoverKeepLocalGateRaceNamesTheAnchorItLeft is the other half: once the
+// anchor IS written, the refusal that can still follow it must name that ref
+// instead of claiming nothing was written.
+func TestRecoverKeepLocalGateRaceNamesTheAnchorItLeft(t *testing.T) {
+	f := newStrandedFixture(t)
+	mustRun(t, f.local, "reset", "--hard", f.base)
+	mustWrite(t, filepath.Join(f.local, "file.txt"), "feature, reworked locally\n")
+	mustRun(t, f.local, "commit", "-am", "reworked feature")
+
+	f.service.beforeGateReset = func() {
+		writer := filepath.Join(t.TempDir(), "racer")
+		mustRun(t, filepath.Dir(writer), "-c", "core.autocrlf=false", "clone", f.gate, writer)
+		configureIdentity(t, writer)
+		mustRun(t, writer, "checkout", "feature/recover")
+		mustWrite(t, filepath.Join(writer, "race.txt"), "race\n")
+		mustRun(t, writer, "add", "race.txt")
+		mustRun(t, writer, "commit", "-m", "racing push")
+		mustRun(t, writer, "push", "origin", "HEAD:refs/heads/feature/recover")
+	}
+	state := f.service.Recover(f.ctx, true)
+	if state.Recovered || state.Safety != "blocked_recover_gate_race" {
+		t.Fatalf("racing keep-local recover = %#v", state)
+	}
+	anchor := "refs/no-mistakes/recover-abandoned/" + f.run.ID
+	if got := mustRun(t, f.local, "rev-parse", anchor); got != f.submitted {
+		t.Fatalf("abandonment anchor = %s, want the submitted head %s", got, f.submitted)
+	}
+	if !strings.Contains(state.Error, anchor) {
+		t.Fatalf("refusal does not name the anchor it left: %q", state.Error)
+	}
+	if strings.Contains(state.Error, "no local files or refs were changed") {
+		t.Fatalf("refusal still claims it wrote no local refs: %q", state.Error)
+	}
+	if f.custodyReturned() {
+		t.Fatal("racing recover stamped custody")
+	}
+}
+
 // TestRecoverRebasedPipelineHeadReturnsCustody covers the intent's headline
 // scenario end to end now that the rebase step adopts its head on the gate
 // branch: the preserved head is the submission replayed onto a newer base, so

@@ -174,8 +174,11 @@ func adoptBranchRef(sctx *pipeline.StepContext, newHeadSHA string) error {
 	current, err := stepGitRun(sctx, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
 	current = strings.TrimSpace(current)
 	if err != nil || current == "" {
-		// The gate does not hold this branch yet, so there is nothing to lose.
-		if _, createErr := stepGitRun(sctx, "update-ref", ref, newHeadSHA); createErr != nil {
+		// The ref did not resolve, so the create is asserted rather than
+		// assumed: the empty old value makes Git itself refuse when the ref
+		// does exist, which covers both a branch created inside the decision
+		// window and a resolution failure that only looked like absence.
+		if _, createErr := stepGitRun(sctx, "update-ref", ref, newHeadSHA, ""); createErr != nil {
 			return fmt.Errorf("create local branch ref %s at %s: %w", ref, newHeadSHA, createErr)
 		}
 		return nil

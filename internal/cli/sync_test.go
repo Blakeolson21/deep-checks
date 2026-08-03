@@ -969,6 +969,37 @@ func TestSyncRecoverFlagValidation(t *testing.T) {
 	}
 }
 
+// TestHumanSyncCheckStatesCustodyNotPreservation covers the human-rendered
+// summary for a terminal run that still holds the branch. A pipeline head the
+// rebase step never adopted on a ref may exist nowhere, and `rerun` resolves
+// its head from the gate branch, so this surface must claim custody and a fresh
+// validation rather than promising the commits survived and can be re-validated.
+func TestHumanSyncCheckStatesCustodyNotPreservation(t *testing.T) {
+	f := newCLIRecoverFixture(t)
+	out, err := executeCmd("sync", "--check")
+	var ee *exitError
+	if err == nil || !asExitError(err, &ee) || ee.code != 1 {
+		t.Fatalf("stranded human check should exit 1, got %#v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"still in pipeline custody",
+		"no-mistakes sync --recover",
+		"start a fresh validation from the gate branch head",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("human check summary missing %q:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{"without publishing its pipeline commits", "to resume validation"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("human check summary still promises %q:\n%s", unwanted, out)
+		}
+	}
+	if got := cliGit(t, f.local, "rev-parse", "HEAD"); got != f.submitted {
+		t.Fatal("check moved HEAD")
+	}
+}
+
 func TestHumanSyncRecoverRequiresConfirmationOutsideTTY(t *testing.T) {
 	f := newCLIRecoverFixture(t)
 	previous := syncInteractive

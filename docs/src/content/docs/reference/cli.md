@@ -218,7 +218,7 @@ Anything it cannot decide - unlanded local commits, or a rebase whose fix rounds
 A dirty worktree refuses with explicit choices.
 When you explicitly keep a behind or diverged local head instead of taking the preserved head, `--keep-local` returns custody at the current head without touching the worktree and atomically points the gate branch at it, so a concurrent gate push wins and the recovery refuses instead.
 Unless your kept head already contains it, the commit the gate branch is moved off is anchored under `refs/no-mistakes/recover-abandoned/<run>` first.
-`no-mistakes rerun` is the alternative exit that resumes validating the preserved head instead of taking the branch back.
+`no-mistakes rerun` is the alternative exit: instead of taking the branch back it starts a fresh run from the current gate branch head, which is the pipeline head only when the pipeline adopted one there.
 A recovered never-pushed run reports `state: custody_returned`; a recovered pushed run reports its ordinary classification against the last push binding, typically `local_ahead`.
 On a `user_owned` branch, `--recover` is an idempotent no-op success: nothing pipeline-created exists to recover, and no file, ref, or database row changes.
 

@@ -3,6 +3,7 @@ package steps
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -173,5 +174,49 @@ func TestAdoptBranchRef_RefusesClobberingConcurrentPush(t *testing.T) {
 	}
 	if got := gitCmd(t, dir, "rev-parse", "refs/heads/feature"); got != pipelineHead {
 		t.Fatalf("branch ref = %s, want the adopted pipeline head %s", got, pipelineHead)
+	}
+}
+
+// TestAdoptBranchRef_RefusesToCreateOverAnExistingUnresolvableRef closes the
+// remaining loss path in the shared adoption. The create branch is taken
+// whenever the branch ref does not RESOLVE, which is not the same as it not
+// EXISTING: `rev-parse --verify --quiet` reports a present-but-unreadable ref
+// exactly like a missing one, so an unguarded create there overwrites a commit
+// the gate still holds - the one thing this helper exists to prevent. The
+// create asserts absence instead of assuming it, so Git itself refuses.
+func TestAdoptBranchRef_RefusesToCreateOverAnExistingUnresolvableRef(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	writeFile(t, dir, "pipeline.txt", "pipeline\n")
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "pipeline commit")
+	pipelineHead := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	const unreadable = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	refPath := filepath.Join(dir, ".git", "refs", "heads", "feature")
+	if err := os.MkdirAll(filepath.Dir(refPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(refPath, []byte(unreadable+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gitCmd(t, dir, "for-each-ref", "--format=%(refname)", "refs/heads/"), "refs/heads/feature") {
+		t.Skip("this Git ref backend does not store branches as loose ref files")
+	}
+
+	if err := adoptBranchRef(sctx, pipelineHead); err == nil {
+		t.Fatal("adoption created a branch ref over one the repository still holds")
+	}
+	stored, err := os.ReadFile(refPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(stored)); got != unreadable {
+		t.Fatalf("branch ref = %s, want the untouched %s", got, unreadable)
 	}
 }
