@@ -583,6 +583,21 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 	if existing, anchorErr := git.Run(ctx, wd, "rev-parse", anchorRef+"^{commit}"); anchorErr == nil && existing == preserved {
 		anchored = true
 	}
+	// A gate branch still at the run's SUBMITTED head means the pipeline never
+	// adopted anything past submission: every step that advances the run head
+	// with new content also moves refs/heads/<branch> in the gate, so a gate
+	// frozen at the submitted head proves the recorded pipeline head carries no
+	// unique commits (it can only be the submission replayed onto a newer base
+	// by the rebase step). That head was never published and cannot be fetched;
+	// insisting on verifying it here made recovery unreachable (dogfood runs
+	// 01KZ3Z8WZPDG7FHAG7QJF4S5DY and 01KZ4176DNSQCTVXXE0NNS8K2K: sync pointed
+	// at --recover, and --recover refused with blocked_recover_gate_diverged).
+	// Custody return is a bookkeeping no-op; nothing is anchored because there
+	// is nothing to preserve.
+	if submitted := ptr(run.SubmittedHeadSHA); submitted != "" && gateHead == submitted &&
+		(local == gateHead || isAncestor(ctx, wd, gateHead, local)) {
+		return s.finishRecover(ctx, run, false)
+	}
 	// A keep-local recovery that reset the gate but crashed before stamping
 	// custody resumes here: the gate already equals the kept local head and
 	// the preserved head is already anchored.

@@ -1594,3 +1594,102 @@ func TestRecoverSquashedPreservedHeadStillEscalatesForDroppedLocalWork(t *testin
 		t.Fatal("dropped-work escalation stamped custody")
 	}
 }
+
+// TestRecoverGateAtSubmittedHeadIsBookkeepingNoOp is the regression test for
+// the recovery deadlock (dogfood runs 01KZ3Z8WZPDG7FHAG7QJF4S5DY and
+// 01KZ4176DNSQCTVXXE0NNS8K2K): the rebase step recorded a rebased run head
+// that was never adopted on any gate ref, the run finished terminal with push
+// skipped, and the branch classified pipeline_owned. sync pointed at
+// --recover, while --recover refused with blocked_recover_gate_diverged
+// because the gate branch still sat at the SUBMITTED head, not the recorded
+// pipeline head. A gate frozen at the submitted head proves the pipeline
+// adopted nothing past submission, so custody return must succeed as a
+// bookkeeping no-op instead of deadlocking.
+func TestRecoverGateAtSubmittedHeadIsBookkeepingNoOp(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	remote := filepath.Join(root, "upstream.git")
+	mustRun(t, root, "init", "--bare", remote)
+
+	local := filepath.Join(root, "operator")
+	mustRun(t, root, "init", "-b", "main", local)
+	configureIdentity(t, local)
+	mustWrite(t, filepath.Join(local, "file.txt"), "base\n")
+	mustRun(t, local, "add", "file.txt")
+	mustRun(t, local, "commit", "-m", "base")
+	base := mustRun(t, local, "rev-parse", "HEAD")
+	mustRun(t, local, "checkout", "-b", "feature/recover")
+	mustWrite(t, filepath.Join(local, "file.txt"), "feature\n")
+	mustRun(t, local, "commit", "-am", "feature")
+	submitted := mustRun(t, local, "rev-parse", "HEAD")
+
+	// The gate receives the submitted branch and never moves past it.
+	gate := filepath.Join(root, "gate.git")
+	mustRun(t, root, "init", "--bare", gate)
+	mustRun(t, local, "push", gate, "refs/heads/feature/recover:refs/heads/feature/recover")
+
+	// The pipeline's detached worktree rebased the submission onto a newer
+	// base and recorded the result as the run head without adopting it on the
+	// gate branch; the worktree is gone, so the commit is referenced nowhere.
+	pipeline := filepath.Join(root, "pipeline")
+	mustRun(t, root, "-c", "core.autocrlf=false", "clone", gate, pipeline)
+	configureIdentity(t, pipeline)
+	mustRun(t, pipeline, "checkout", "feature/recover")
+	mustWrite(t, filepath.Join(pipeline, "file.txt"), "feature rebased\n")
+	mustRun(t, pipeline, "commit", "-am", "feature replayed on newer base")
+	recorded := mustRun(t, pipeline, "rev-parse", "HEAD")
+	if err := os.RemoveAll(pipeline); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err := db.Open(filepath.Join(root, "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	repo, err := database.InsertRepo(local, remote, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature/recover", submitted, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunHeadSHA(run.ID, recorded); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{DB: database, Repo: repo, WorkDir: local, GateDir: gate}
+
+	// The stranded state classifies as recoverable and points at --recover.
+	state := service.InspectCached(ctx)
+	if state.State != StatePipelineOwned || state.Safety != "blocked_pipeline_owned_recoverable" {
+		t.Fatalf("pre-recovery state = %s safety = %s, want pipeline_owned/blocked_pipeline_owned_recoverable", state.State, state.Safety)
+	}
+
+	// The offered recovery must succeed instead of refusing gate_diverged.
+	state = service.Recover(ctx, false)
+	if !state.Recovered {
+		t.Fatalf("recover refused: safety = %s error = %q", state.Safety, state.Error)
+	}
+	if state.Changed {
+		t.Fatal("bookkeeping recovery reported a worktree change")
+	}
+	if got := mustRun(t, local, "rev-parse", "HEAD"); got != submitted {
+		t.Fatal("recovery mutated the operator worktree")
+	}
+	if got := mustRun(t, gate, "rev-parse", "refs/heads/feature/recover"); got != submitted {
+		t.Fatal("recovery mutated the gate branch")
+	}
+	reloaded, err := database.GetRun(run.ID)
+	if err != nil || reloaded == nil || reloaded.CustodyReturnedAt == nil {
+		t.Fatalf("custody was not stamped: %#v, %v", reloaded, err)
+	}
+	// A second recovery is idempotent.
+	state = service.Recover(ctx, false)
+	if !state.Recovered || state.Changed {
+		t.Fatalf("re-recovery = %#v", state)
+	}
+}
