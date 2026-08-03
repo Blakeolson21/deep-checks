@@ -39,10 +39,10 @@ type RefRunner func(args ...string) (string, error)
 //
 // The write itself compare-and-swaps against the value just read, so a push
 // that lands inside the decision window fails the caller rather than racing it.
-// The ref did not resolve, the create is asserted rather than assumed: the
-// empty old value makes Git itself refuse when the ref does exist, which covers
-// both a branch created inside the decision window and a resolution failure
-// that only looked like absence.
+// When the ref does not resolve, the create is asserted rather than assumed:
+// the empty old value makes Git itself refuse when the ref does exist, which
+// covers both a branch created inside the decision window and a resolution
+// failure that only looked like absence.
 func AdoptBranchRef(run RefRunner, branch, newHeadSHA, recordedHeadSHA string) error {
 	ref := BranchRef(branch)
 	current, err := run("rev-parse", "--verify", "--quiet", ref+"^{commit}")

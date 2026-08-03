@@ -220,7 +220,8 @@ When you explicitly keep a behind or diverged local head instead of taking the p
 Unless your kept head already contains it, the commit the gate branch is moved off is anchored under `refs/no-mistakes/recover-abandoned/<run>` first.
 `no-mistakes rerun` is the alternative exit: instead of taking the branch back it starts a fresh run from the current gate branch head, which is the pipeline head only when the pipeline adopted one there.
 A recovered never-pushed run reports `state: custody_returned`; a recovered pushed run reports its ordinary classification against the last push binding, typically `local_ahead`.
-When custody returns while your branch does not carry the preserved pipeline commits - the frozen-gate case, and every `--keep-local` recovery - the success reports `preserved_anchor` with the ref that still holds them, because the branch itself no longer does.
+When custody returns while your branch does not carry a commit the recovery anchored, the success names the holding ref: `preserved_anchor` for the preserved pipeline commits (the frozen-gate case, and every `--keep-local` recovery) and `abandoned_anchor` for the gate head a `--keep-local` compare-and-swap moved the branch off.
+Re-running the idempotent recovery reports the same refs, and a refusal that follows an anchor write names them instead of claiming nothing was written.
 On a `user_owned` branch, `--recover` is an idempotent no-op success: nothing pipeline-created exists to recover, and no file, ref, or database row changes.
 
 ## no-mistakes axi logs

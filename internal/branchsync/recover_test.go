@@ -1915,15 +1915,87 @@ func TestRecoverReportsTheAnchorHoldingWorkTheBranchLost(t *testing.T) {
 		if state.PreservedAnchorRef != "" {
 			t.Fatalf("preserved anchor = %q, want none: the branch carries the preserved head", state.PreservedAnchorRef)
 		}
+		if state.AbandonedAnchorRef != "" {
+			t.Fatalf("abandoned anchor = %q, want none", state.AbandonedAnchorRef)
+		}
+	})
+	t.Run("keep-local names the gate head its compare-and-swap let go", func(t *testing.T) {
+		f := newStrandedFixture(t)
+		mustRun(t, f.local, "reset", "--hard", f.base)
+		mustWrite(t, filepath.Join(f.local, "file.txt"), "feature, reworked locally\n")
+		mustRun(t, f.local, "commit", "-am", "reworked feature")
+
+		state := f.service.Recover(f.ctx, true)
+		if !state.Recovered {
+			t.Fatalf("keep-local recover = %#v", state)
+		}
+		// Two different commits are stranded here, and the branch carries
+		// neither: the pipeline head at the recover anchor, and the submitted
+		// head the operator reset past, which only the abandonment anchor holds.
+		abandoned := "refs/no-mistakes/recover-abandoned/" + f.run.ID
+		if state.AbandonedAnchorRef != abandoned {
+			t.Fatalf("abandoned anchor = %q, want %s", state.AbandonedAnchorRef, abandoned)
+		}
+		if got := mustRun(t, f.local, "rev-parse", state.AbandonedAnchorRef); got != f.submitted {
+			t.Fatalf("reported abandonment anchor holds %s, want the submitted head %s", got, f.submitted)
+		}
+		if state.PreservedAnchorRef != f.anchorRef() {
+			t.Fatalf("preserved anchor = %q, want %s", state.PreservedAnchorRef, f.anchorRef())
+		}
+	})
+	t.Run("re-running the idempotent recovery reports the same anchors", func(t *testing.T) {
+		f := newStrandedFixture(t)
+		first := f.service.Recover(f.ctx, false)
+		if !first.Recovered || first.PreservedAnchorRef == "" {
+			t.Fatalf("first recover = %#v", first)
+		}
+		again := f.service.Recover(f.ctx, false)
+		if !again.Recovered {
+			t.Fatalf("idempotent recover = %#v", again)
+		}
+		if again.PreservedAnchorRef != first.PreservedAnchorRef || again.AbandonedAnchorRef != first.AbandonedAnchorRef {
+			t.Fatalf("idempotent recover reported anchors %q/%q, want the first call's %q/%q",
+				again.PreservedAnchorRef, again.AbandonedAnchorRef, first.PreservedAnchorRef, first.AbandonedAnchorRef)
+		}
 	})
 }
 
-// TestRecoverKeepLocalRefusalLeavesNoAnchorBehind keeps the "a refusal changes
-// nothing" promise literal. The abandonment anchor may only be written once the
-// recovery is actually about to move the gate branch: a refusal that still
-// reports "no files or refs were changed" while a recover-abandoned ref sits in
-// the repository is indistinguishable from one a successful recovery wrote, and
-// the operator cannot tell whether the recovery ran.
+// TestRecoverFrozenGateRefusalNamesTheAnchorItWrote: the frozen-gate row anchors
+// the stranded pipeline head BEFORE it can still refuse, so the refusal must not
+// claim it changed nothing. Two things ride on that: a stale anchor left by a
+// refusal would be indistinguishable from one a successful recovery wrote, and
+// the agent-resolved commits the anchor exists to rescue would be invisible at
+// exactly the moment the operator is told to reconcile.
+func TestRecoverFrozenGateRefusalNamesTheAnchorItWrote(t *testing.T) {
+	f := newStrandedFixture(t)
+	mustRun(t, f.local, "reset", "--hard", f.base)
+	mustWrite(t, filepath.Join(f.local, "file.txt"), "feature, reworked locally\n")
+	mustRun(t, f.local, "commit", "-am", "reworked feature")
+
+	state := f.service.Recover(f.ctx, false)
+	if state.Recovered || state.Safety != "blocked_recover_gate_diverged" {
+		t.Fatalf("frozen-gate refusal = %#v", state)
+	}
+	if got := mustRun(t, f.local, "rev-parse", f.anchorRef()); got != f.preserved {
+		t.Fatalf("anchor holds %s, want the stranded pipeline head %s", got, f.preserved)
+	}
+	if strings.Contains(state.Error, "no files or refs were changed") {
+		t.Fatalf("refusal claims it wrote no refs after anchoring the stranded head: %q", state.Error)
+	}
+	if !strings.Contains(state.Error, f.anchorRef()) {
+		t.Fatalf("refusal does not name the anchor holding the rescued commits: %q", state.Error)
+	}
+	if f.custodyReturned() {
+		t.Fatal("refusal stamped custody")
+	}
+}
+
+// TestRecoverKeepLocalRefusalLeavesNoAnchorBehind keeps refusal reporting
+// literal. The abandonment anchor may only be written once the recovery is
+// actually about to move the gate branch, and a refusal must describe exactly
+// the refs that do exist: a ref left behind but not named is indistinguishable
+// from one a successful recovery wrote, and the operator cannot tell whether
+// the recovery ran.
 func TestRecoverKeepLocalRefusalLeavesNoAnchorBehind(t *testing.T) {
 	f := newStrandedFixture(t)
 	mustRun(t, f.local, "reset", "--hard", f.base)
@@ -1938,11 +2010,15 @@ func TestRecoverKeepLocalRefusalLeavesNoAnchorBehind(t *testing.T) {
 	if state.Recovered || state.Safety != "blocked_recover_assumptions_changed" {
 		t.Fatalf("keep-local recover with a moving local head = %#v", state)
 	}
-	if !strings.Contains(state.Error, "no files or refs were changed") {
-		t.Fatalf("refusal does not claim it changed nothing: %q", state.Error)
+	abandoned := "refs/no-mistakes/recover-abandoned/" + f.run.ID
+	if _, err := gitpkg.Run(f.ctx, f.local, "rev-parse", "--verify", abandoned); err == nil {
+		t.Fatal("a refusal before the gate move left an abandonment anchor behind")
 	}
-	if _, err := gitpkg.Run(f.ctx, f.local, "rev-parse", "--verify", "refs/no-mistakes/recover-abandoned/"+f.run.ID); err == nil {
-		t.Fatal("a refusal that promised it changed nothing left an abandonment anchor behind")
+	if strings.Contains(state.Error, abandoned) {
+		t.Fatalf("refusal names an abandonment anchor it never wrote: %q", state.Error)
+	}
+	if !strings.Contains(state.Error, f.anchorRef()) {
+		t.Fatalf("refusal does not name the preserved anchor this call did write: %q", state.Error)
 	}
 	if f.custodyReturned() {
 		t.Fatal("refusal stamped custody")

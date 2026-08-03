@@ -263,6 +263,9 @@ func printHumanSyncState(cmd *cobra.Command, state branchsync.State) {
 	if state.PreservedAnchorRef != "" {
 		fmt.Fprintf(w, "  anchored: %s holds pipeline commits this branch does not contain\n", state.PreservedAnchorRef)
 	}
+	if state.AbandonedAnchorRef != "" {
+		fmt.Fprintf(w, "  anchored: %s holds the gate head this recovery let go\n", state.AbandonedAnchorRef)
+	}
 	if state.Error != "" {
 		fmt.Fprintf(w, "  blocked:  %s\n", state.Error)
 	}
@@ -456,6 +459,9 @@ func branchSyncField(state branchsync.State) toON.Field {
 	}
 	if state.PreservedAnchorRef != "" {
 		fields = append(fields, toON.Field{Key: "preserved_anchor", Value: state.PreservedAnchorRef})
+	}
+	if state.AbandonedAnchorRef != "" {
+		fields = append(fields, toON.Field{Key: "abandoned_anchor", Value: state.AbandonedAnchorRef})
 	}
 	fields = append(fields,
 		toON.Field{Key: "local", Value: toON.NewObject(local...)},

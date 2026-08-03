@@ -78,14 +78,17 @@ type State struct {
 	// outcome had already released the branch (user_owned), making recovery an
 	// idempotent no-op.
 	Recovered bool
-	// PreservedAnchorRef names the private ref holding pipeline commits the
-	// returned branch does NOT contain, and is set only when custody returns
-	// that way: the frozen-gate row anchors a stranded head the branch never
-	// reaches, and --keep-local deliberately abandons the preserved head. Both
-	// report changed: false, so without this the only record of pipeline-authored
-	// work (an agent's conflict resolutions, for instance) is a ref no output
-	// names. It stays empty whenever the branch ends up carrying that work.
+	// PreservedAnchorRef and AbandonedAnchorRef name the private refs holding
+	// commits the returned branch does NOT contain, and are set only when
+	// custody returns that way: the frozen-gate row anchors a stranded pipeline
+	// head the branch never reaches, --keep-local deliberately abandons the
+	// preserved head, and its gate compare-and-swap separately abandons the
+	// commit the gate branch pointed at. Those returns report changed: false, so
+	// without these the only record of that work (an agent's conflict
+	// resolutions, or a submitted head the operator reset past) is a ref no
+	// output names. Each stays empty whenever the branch carries that commit.
 	PreservedAnchorRef string
+	AbandonedAnchorRef string
 	NextAction         *NextAction
 	Error              string
 }
@@ -531,10 +534,11 @@ func (s *Service) Apply(ctx context.Context) State {
 // exit: it starts a fresh run from the current gate branch head, which is the
 // pipeline head only when the pipeline adopted one there.
 //
-// When custody returns while the branch does NOT carry the preserved pipeline
-// commits (the frozen-gate row, and --keep-local anywhere), the anchor holding
-// them is reported as PreservedAnchorRef so the success output names the only
-// remaining reference to that work.
+// Whenever a recovered branch does NOT carry a commit this recovery anchored
+// (the frozen-gate row, and --keep-local anywhere), the holding ref is reported
+// as PreservedAnchorRef or AbandonedAnchorRef so the success output names the
+// only remaining reference to that work, and re-running the idempotent recovery
+// reports exactly the same refs.
 func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 	if refusal, blocked := s.gateContextRefusal(ctx); blocked {
 		return refusal
@@ -543,6 +547,7 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 	if run != nil && run.CustodyReturnedAt != nil {
 		state.Recovered = true
 		state.Changed = false
+		s.attachUnclaimedAnchors(ctx, run.ID, &state)
 		return state
 	}
 	// A branch released by its terminal outcome is already the operator's:
@@ -657,7 +662,7 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 		if local == gateHead || isAncestor(ctx, wd, gateHead, local) {
 			return s.finishRecover(ctx, run, false)
 		}
-		blocked := blockedPlan(state, StatePipelineOwned, "blocked_recover_gate_diverged", fmt.Sprintf("the pipeline never adopted its recorded head %s, and the local branch no longer contains the submitted head %s the gate still holds; fast-forward or reconcile onto it and re-run the recovery, or use --keep-local to return custody at the current local head; no files or refs were changed", preserved, gateHead))
+		blocked := blockedPlan(state, StatePipelineOwned, "blocked_recover_gate_diverged", fmt.Sprintf("the pipeline never adopted its recorded head %s, and the local branch no longer contains the submitted head %s the gate still holds; fast-forward or reconcile onto it and re-run the recovery, or use --keep-local to return custody at the current local head; %s", preserved, gateHead, s.refusalRefClause(ctx, run.ID, local)))
 		blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "git log --oneline --left-right HEAD..." + gateHead}
 		return blocked
 	}
@@ -740,24 +745,24 @@ func (s *Service) recoverKeepLocal(ctx context.Context, run *db.Run, state State
 	if gateHead != state.Local.Head {
 		head, err := git.HeadSHA(ctx, s.workDir())
 		if err != nil || head != state.Local.Head {
-			return blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the local branch head changed while custody was being returned; no files or refs were changed")
+			return blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the local branch head changed while custody was being returned; "+s.refusalRefClause(ctx, run.ID, state.Local.Head))
 		}
 		// The fetch source must be absolute: the command runs inside the gate
 		// directory, where a relative invoking-worktree path would resolve to
 		// the gate itself.
 		source, err := filepath.Abs(s.workDir())
 		if err != nil {
-			return blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the invoking worktree path could not be resolved; no files or refs were changed")
+			return blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the invoking worktree path could not be resolved; "+s.refusalRefClause(ctx, run.ID, state.Local.Head))
 		}
 		stagingRef := "refs/no-mistakes/custody-return/" + run.ID
 		if _, err := git.Run(ctx, s.GateDir, "fetch", "--no-tags", "--no-write-fetch-head", source, "+refs/heads/"+state.Local.Branch+":"+stagingRef); err != nil {
 			_, _ = git.Run(ctx, s.GateDir, "update-ref", "-d", stagingRef)
-			return blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the kept local head could not be staged into the gate; no files or refs were changed")
+			return blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the kept local head could not be staged into the gate; "+s.refusalRefClause(ctx, run.ID, state.Local.Head))
 		}
 		staged, err := git.Run(ctx, s.GateDir, "rev-parse", stagingRef+"^{commit}")
 		if err != nil || staged != state.Local.Head {
 			_, _ = git.Run(ctx, s.GateDir, "update-ref", "-d", stagingRef)
-			return blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the local branch head changed while custody was being returned; no files or refs were changed")
+			return blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the local branch head changed while custody was being returned; "+s.refusalRefClause(ctx, run.ID, state.Local.Head))
 		}
 		if blocked, ok := s.anchorAbandonedGateHead(ctx, state, run.ID, gateHead); !ok {
 			_, _ = git.Run(ctx, s.GateDir, "update-ref", "-d", stagingRef)
@@ -766,11 +771,7 @@ func (s *Service) recoverKeepLocal(ctx context.Context, run *db.Run, state State
 		_, casErr := git.Run(ctx, s.GateDir, "update-ref", "refs/heads/"+state.Local.Branch, state.Local.Head, gateHead)
 		_, _ = git.Run(ctx, s.GateDir, "update-ref", "-d", stagingRef)
 		if casErr != nil {
-			unchanged := "your worktree and the gate branch were not changed"
-			if anchor := recoverAbandonedAnchorRef(run.ID); refExists(ctx, s.workDir(), anchor) {
-				unchanged += ", and the gate head it would have abandoned stays anchored at " + anchor
-			}
-			return blockedPlan(state, StatePipelineOwned, "blocked_recover_gate_race", "the gate branch changed while custody was being returned; re-run the recovery; "+unchanged)
+			return blockedPlan(state, StatePipelineOwned, "blocked_recover_gate_race", "the gate branch changed while custody was being returned; re-run the recovery; "+s.refusalRefClause(ctx, run.ID, state.Local.Head))
 		}
 	}
 	return s.finishRecover(ctx, run, false)
@@ -1069,24 +1070,51 @@ func (s *Service) finishRecover(ctx context.Context, run *db.Run, changed bool) 
 	state, _, _ := s.inspect(ctx)
 	state.Recovered = true
 	state.Changed = changed
-	state.PreservedAnchorRef = s.unclaimedPreservedAnchor(ctx, run, state.Local.Head)
+	s.attachUnclaimedAnchors(ctx, run.ID, &state)
 	return state
 }
 
-// unclaimedPreservedAnchor returns the recover anchor ref when it pins pipeline
-// commits the recovered branch does not contain, and "" when the branch carries
-// them (or nothing was preservable).
-func (s *Service) unclaimedPreservedAnchor(ctx context.Context, run *db.Run, localHead string) string {
-	preserved := strings.TrimSpace(run.HeadSHA)
+// attachUnclaimedAnchors reports every private ref this recovery left holding a
+// commit the returned branch does not contain, so a custody return never hides
+// where work went. It is the single owner of that reporting: every path that
+// returns a recovered state must agree, including the idempotent re-recovery.
+func (s *Service) attachUnclaimedAnchors(ctx context.Context, runID string, state *State) {
+	state.PreservedAnchorRef = s.unclaimedAnchorRef(ctx, recoverAnchorRef(runID), state.Local.Head)
+	state.AbandonedAnchorRef = s.unclaimedAnchorRef(ctx, recoverAbandonedAnchorRef(runID), state.Local.Head)
+}
+
+// unclaimedAnchorRef returns ref when it resolves to a commit the branch head
+// does not already contain, and "" otherwise.
+func (s *Service) unclaimedAnchorRef(ctx context.Context, ref, localHead string) string {
 	wd := s.workDir()
-	if preserved == "" || preserved == localHead || isAncestor(ctx, wd, preserved, localHead) {
+	anchored, err := git.Run(ctx, wd, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	if err != nil {
 		return ""
 	}
-	ref := recoverAnchorRef(run.ID)
-	if anchored, err := git.Run(ctx, wd, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err == nil && strings.TrimSpace(anchored) == preserved {
-		return ref
+	sha := strings.TrimSpace(anchored)
+	if sha == "" || sha == localHead || isAncestor(ctx, wd, sha, localHead) {
+		return ""
 	}
-	return ""
+	return ref
+}
+
+// refusalRefClause states what a refusal actually left behind. Recovery anchors
+// before it can still refuse, so a hard-coded "no files or refs were changed"
+// is both false and hides the only remaining reference to the rescued commits.
+// It names whichever anchors currently hold work the branch does not contain,
+// and falls back to the plain no-change promise when there are none.
+func (s *Service) refusalRefClause(ctx context.Context, runID, localHead string) string {
+	var anchors []string
+	if ref := s.unclaimedAnchorRef(ctx, recoverAnchorRef(runID), localHead); ref != "" {
+		anchors = append(anchors, "the preserved pipeline commits stay anchored at "+ref)
+	}
+	if ref := s.unclaimedAnchorRef(ctx, recoverAbandonedAnchorRef(runID), localHead); ref != "" {
+		anchors = append(anchors, "the gate head this recovery would abandon stays anchored at "+ref)
+	}
+	if len(anchors) == 0 {
+		return "no files or refs were changed"
+	}
+	return "your worktree, branch, and the gate branch were not changed, and " + strings.Join(anchors, ", and ")
 }
 
 func recoverAnchorRef(runID string) string {
@@ -1619,11 +1647,6 @@ func pushStepRunning(database *db.DB, runID string) bool {
 		}
 	}
 	return false
-}
-
-func refExists(ctx context.Context, dir, ref string) bool {
-	_, err := git.Run(ctx, dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
-	return err == nil
 }
 
 func objectExists(ctx context.Context, dir, sha string) bool {
