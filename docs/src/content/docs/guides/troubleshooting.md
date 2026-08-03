@@ -83,7 +83,7 @@ If you have multiple installs with different `NM_HOME` roots, each gets its own 
 
 Symptom: the command refuses because active pipeline runs are in progress and lists them.
 
-`daemon stop` and `daemon restart` both refuse by default while pipeline runs are active and list the affected runs; [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the guard's exact rules, including the `--force` override each command takes and why `--force` does not cover a run that is executing a step.
+`daemon stop` and `daemon restart` both refuse by default while pipeline runs are active and list the affected runs; [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the guard's exact rules, including the `--force` override each command takes and why `--force` does not cover a run that is executing a step. `daemon start` can refuse for that last reason alone, because refreshing a stale service definition restarts the daemon.
 
 `no-mistakes update` is not a way around a stale install here: self-update is disabled in this build, and the [CLI reference](/no-mistakes/reference/cli/#no-mistakes-update) owns the rebuild-from-source path that replaces it.
 

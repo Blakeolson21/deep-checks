@@ -60,11 +60,12 @@ A run counts as executing whenever a daemon is serving this `NM_HOME` and the ru
 
 `no-mistakes daemon start` applies the executing tier of the same guard, because when the daemon is already running it refreshes a stale service definition by stopping and restarting it. It has no `--force`, since starting the daemon is how you recover from a stopped one and parked or idle runs never stand in the way; only an executing run refuses it, and only `--abandon-executing-runs` proceeds past that.
 
-That `--force` override is available only to an ordinary top-level caller. A
+Those overrides are available only to an ordinary top-level caller. A
 process descended from an active validation-step agent cannot start, stop,
 restart, or update the daemon; recursive containment refuses the command before
-any lifecycle mutation, with no `--force` or `--yes` bypass.
-Every invocation of `daemon stop`, `daemon restart`, or `update` - forced or not - logs the caller's PID, parent PID, and parent command line to `~/.no-mistakes/logs/cli.log` so a later incident can identify which agent or process triggered it.
+any lifecycle mutation, with no `--force`, `--abandon-executing-runs`, or
+`--yes` bypass.
+Every invocation of `daemon start`, `daemon stop`, `daemon restart`, or `update` - forced or not - logs the caller's PID, parent PID, and parent command line to `~/.no-mistakes/logs/cli.log`, recording `--force` and `--abandon-executing-runs` as separate fields, so a later incident can identify which agent or process triggered it and what it authorized.
 
 The daemon writes an identity record to `~/.no-mistakes/daemon.pid` and listens on a Unix socket at `~/.no-mistakes/socket`. On Windows, it uses a localhost TCP listener and a protected endpoint file at the same path. CLI clients bound how long they wait for that socket to accept a connection with `daemon_connect_timeout` (default `3s`, override with `NM_DAEMON_CONNECT_TIMEOUT`), so a daemon process that is alive but stuck fails the connection instead of hanging the caller; see [Troubleshooting](/no-mistakes/guides/troubleshooting/#check-for-stale-artifacts).
 Commands that ensure the daemon is running (`no-mistakes`, `init`, `attach`, `rerun`, `axi run`, `axi respond`) also fail fast rather than silently starting a replacement daemon when the socket file exists but nothing answers at all, such as a dead socket left behind by an unclean exit; `no-mistakes daemon start` self-heals past that case.
@@ -128,7 +129,7 @@ Daemon lifecycle logs go to `~/.no-mistakes/logs/daemon.log`. Startup logs repor
 
 Managed Rovo Dev and OpenCode server stdout and stderr go to `~/.no-mistakes/logs/managed-server.log`, separate from concise server startup, exit, and failure summaries in the lifecycle log. Output written before the lifecycle logger is ready, plus direct crash output, goes to `~/.no-mistakes/logs/daemon-bootstrap.log`. The lifecycle log retains a 32 MiB current file and three backups, managed-server output retains a 16 MiB current file and two backups, and bootstrap/crash output retains a 1 MiB current file and two backups. Backups use `.1` for the newest retained file.
 
-The setup wizard separately captures managed agent-server output in `~/.no-mistakes/logs/wizard-agent.log`. Each pipeline step writes to `~/.no-mistakes/logs/<runID>/<step>.log`, and fatal step errors are appended there so the step log includes the failure reason even when the detail comes from command stderr. `daemon stop`, `daemon restart`, and `update` invocations are logged separately to `~/.no-mistakes/logs/cli.log` with the caller's PID, parent PID, and parent command line.
+The setup wizard separately captures managed agent-server output in `~/.no-mistakes/logs/wizard-agent.log`. Each pipeline step writes to `~/.no-mistakes/logs/<runID>/<step>.log`, and fatal step errors are appended there so the step log includes the failure reason even when the detail comes from command stderr. Daemon lifecycle and `update` invocations are logged separately to `~/.no-mistakes/logs/cli.log`; [Starting and stopping](#starting-and-stopping) owns what that line records.
 
 Set the log level in global config:
 

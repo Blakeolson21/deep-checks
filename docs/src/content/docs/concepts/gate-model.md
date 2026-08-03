@@ -211,7 +211,7 @@ Everything lives under `~/.no-mistakes/` by default. Set `NM_HOME` to relocate i
 | `logs/daemon-bootstrap.log`      | Bounded pre-logger bootstrap and direct crash output                                                                    |
 | `logs/managed-server.log`        | Bounded stdout and stderr from daemon-managed Rovo Dev and OpenCode servers                                             |
 | `logs/wizard-agent.log`          | Managed agent-server output captured during setup wizard runs                                                           |
-| `logs/cli.log`                   | Caller attribution (PID, parent PID, parent command line) for `daemon stop`, `daemon restart`, and `update` invocations |
+| `logs/cli.log`                   | Caller attribution (PID, parent PID, parent command line) for daemon lifecycle and `update` invocations                 |
 
 New repo IDs are the first 6 bytes (12 hex chars) of `sha256(absolute_working_path)`.
 When an initialized working repo is renamed or moved, `init` preserves the existing repo ID instead of deriving a new one from the new path.
