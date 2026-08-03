@@ -20,8 +20,8 @@ func newUpdateCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().BoolVar(&beta, "beta", false, "install the latest release including prereleases")
-	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "answer yes to update safety prompts")
-	cmd.Flags().BoolVar(&force, "force", false, "update and restart the daemon even when pipeline runs are active")
+	cmd.Flags().BoolVar(&beta, "beta", false, "accepted for compatibility; self-update is disabled in this build and this flag does not re-enable it")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "accepted for compatibility; self-update is disabled in this build and this flag does not re-enable it")
+	cmd.Flags().BoolVar(&force, "force", false, "accepted for compatibility; self-update is disabled in this build and this flag does not re-enable it")
 	return cmd
 }
