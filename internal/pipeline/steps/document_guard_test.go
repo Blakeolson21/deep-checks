@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -314,5 +315,94 @@ func TestGuardLineIsSubstantive(t *testing.T) {
 		if got := guardLineIsSubstantive(normalizeGuardLine(c.line)); got != c.want {
 			t.Errorf("guardLineIsSubstantive(%q) = %v, want %v", c.line, got, c.want)
 		}
+	}
+}
+
+// The screen collects candidates out of a map, and judgeDocumentReversal shows
+// the judge only the first guardCandidateLimit of them. Without a total order,
+// the same pair of commits can put a different subset in front of the judge on
+// every run and reach a different verdict.
+func TestScreenRevertedPipelineContent_CandidateOrderIsDeterministic(t *testing.T) {
+	t.Parallel()
+	dir, _, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+	submitted := strings.TrimSpace(gitCmd(t, dir, "rev-parse", "HEAD"))
+
+	// diffLines keys on normalized text, so each file needs its own distinct
+	// lines to land more than guardCandidateLimit candidates across two files.
+	for _, name := range []string{"docs/beta.md", "docs/alpha.md"} {
+		var established []string
+		for i := 0; i < 40; i++ {
+			established = append(established, fmt.Sprintf("%s: the gate refuses request %d because its lease anchor never advanced.", name, i))
+		}
+		if err := os.MkdirAll(filepath.Join(dir, "docs"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(strings.Join(established, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "no-mistakes(review): record the lease defect")
+	preDoc := strings.TrimSpace(gitCmd(t, dir, "rev-parse", "HEAD"))
+
+	for _, name := range []string{"docs/beta.md", "docs/alpha.md"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("placeholder documentation body\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "no-mistakes(document): rewrite the docs")
+	postDoc := strings.TrimSpace(gitCmd(t, dir, "rev-parse", "HEAD"))
+
+	first, err := screenRevertedPipelineContent(context.Background(), dir, submitted, preDoc, postDoc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) < guardCandidateLimit {
+		t.Fatalf("need more than guardCandidateLimit candidates to prove truncation is stable, got %d", len(first))
+	}
+	for i := 1; i < len(first); i++ {
+		prev, cur := first[i-1], first[i]
+		if prev.file > cur.file || (prev.file == cur.file && prev.text >= cur.text) {
+			t.Fatalf("candidates are not totally ordered at %d: %+v then %+v", i, prev, cur)
+		}
+	}
+	for attempt := 0; attempt < 5; attempt++ {
+		again, err := screenRevertedPipelineContent(context.Background(), dir, submitted, preDoc, postDoc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(again) != len(first) {
+			t.Fatalf("attempt %d returned %d candidates, want %d", attempt, len(again), len(first))
+		}
+		for i := range again {
+			if again[i] != first[i] {
+				t.Fatalf("attempt %d differs at %d: %+v, want %+v", attempt, i, again[i], first[i])
+			}
+		}
+	}
+}
+
+// The truncated line reaches both the judge prompt and runs.error, so a cut
+// through a multi-byte rune would store invalid UTF-8 in both.
+func TestTruncateGuardLine_CutsOnRuneBoundary(t *testing.T) {
+	t.Parallel()
+	for _, filler := range []string{"é", "字", "🚀"} {
+		line := strings.Repeat(filler, 400)
+		got := truncateGuardLine(line)
+		if !utf8.ValidString(got) {
+			t.Fatalf("truncateGuardLine(%q repeated) produced invalid UTF-8: %q", filler, got)
+		}
+		if !strings.HasSuffix(got, "...") {
+			t.Fatalf("truncateGuardLine(%q repeated) did not truncate: %q", filler, got)
+		}
+		if len(got) > 203 {
+			t.Fatalf("truncateGuardLine(%q repeated) returned %d bytes, want at most 203", filler, len(got))
+		}
+	}
+	short := "already short enough to survive"
+	if got := truncateGuardLine(short); got != short {
+		t.Fatalf("truncateGuardLine(%q) = %q, want it unchanged", short, got)
 	}
 }

@@ -422,7 +422,7 @@ Each validation run performs the authoritative agent resolution again after appl
 
 ## no-mistakes update
 
-Update the installed binary and reset the daemon.
+Self-update is disabled in this build.
 
 ```sh
 no-mistakes update
@@ -431,20 +431,17 @@ no-mistakes update -y
 no-mistakes update --force
 ```
 
-Downloads the latest release, verifies the SHA-256 checksum, atomically replaces the running binary, and resets the daemon when it is running or stale daemon artifacts exist so the new executable is picked up, preferring the managed service path and falling back to a detached daemon if service startup is unavailable or fails.
-By default this installs the latest stable release.
-Pass `--beta` to include prereleases and install the latest beta when one is newer than the current stable release.
-If the daemon is running from a different executable path, update still prompts before replacing it; pass `-y`/`--yes` to answer that prompt non-interactively.
-If the daemon executable path cannot be determined, the update aborts before replacement.
-If the daemon does not come back cleanly after a successful replacement, the command reports that failure.
-On macOS, removes the quarantine extended attribute.
-[Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping)
-owns the active-run guard, the scope of `--force` and `--yes`, and recursive
-validation-step containment.
+Every one of these invocations fails with an explanation instead of replacing the binary. `--beta`, `-y`/`--yes`, and `--force` are still accepted by the command line, but none of them re-enable the update.
 
-Because `update` installs the latest official release binary, the replacement binary includes the default self-hosted telemetry host and website ID. Disable telemetry with `NO_MISTAKES_TELEMETRY=0`, or override the host and website ID with `NO_MISTAKES_UMAMI_HOST` and `NO_MISTAKES_UMAMI_WEBSITE_ID`.
+This build comes from the `Blakeolson21/no-slop` fork, which carries local patches that exist in no published release. Downloading a release archive over it would silently drop every one of them, and the fork has no release channel of its own to point at, so rebuilding from source is the supported way to move it forward:
 
-Background update checks run automatically on each CLI invocation (except `update` itself and version queries `--version` / `-v`, which stay side-effect-free). If a newer version is available, a notification is printed to stderr. Suppressed for dev builds or when `NO_MISTAKES_NO_UPDATE_CHECK=1` is set.
+```sh
+go build -o "$(command -v no-mistakes)" ./cmd/no-mistakes
+```
+
+Because the binary is never replaced, the daemon is never reset by this command. To pick up a rebuilt binary, restart the daemon yourself with `no-mistakes daemon restart`; [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the active-run guard that applies to it.
+
+Background update checks are disabled with the command, so no CLI invocation probes GitHub for releases, no upgrade notice is printed to stderr, and the TUI never shows an "update available" badge. `NO_MISTAKES_NO_UPDATE_CHECK=1` has no additional effect in this build.
 
 ## no-mistakes daemon start
 
@@ -469,7 +466,7 @@ no-mistakes daemon stop --force
 owns the active-run guard, the scope of `--force`, and recursive
 validation-step containment.
 
-This does not remove the managed service. A later `no-mistakes`, `no-mistakes daemon start`, `init`, `attach`, `rerun`, or `update` can start the daemon again through the same service manager when available, or as a detached daemon otherwise.
+This does not remove the managed service. A later `no-mistakes`, `no-mistakes daemon start`, `init`, `attach`, or `rerun` can start the daemon again through the same service manager when available, or as a detached daemon otherwise.
 
 ## no-mistakes daemon restart
 

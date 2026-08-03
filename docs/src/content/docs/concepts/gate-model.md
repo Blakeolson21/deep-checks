@@ -138,12 +138,10 @@ A long-running background process that manages pipeline runs. It:
 - Persists state to SQLite
 - Streams events to connected TUI clients via IPC
 
-The installer prefers setting up the daemon as a managed background service, and `no-mistakes`, `init`, `attach`, `rerun`, and `update` make sure the daemon is running when needed.
+The installer prefers setting up the daemon as a managed background service, and `no-mistakes`, `init`, `attach`, and `rerun` make sure the daemon is running when needed.
 Bare `no-mistakes` then attaches to the active run on the current branch when one exists, or routes to the setup wizard when it needs to create a new branch/run.
 If managed service install or startup is unavailable or fails, startup falls back to a detached daemon process.
-`update` resets the daemon after replacing the binary when the daemon is running or stale daemon artifacts exist.
-If the daemon is already running from a different executable path, `update` prompts before replacing it.
-If the daemon executable path cannot be determined, `update` aborts before replacing anything.
+`update` never touches the daemon in this build: self-update is disabled, so the binary is never replaced. Use `no-mistakes daemon restart` after rebuilding from source.
 You can also manage it explicitly with `no-mistakes daemon start|stop|restart|status`.
 [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping)
 owns the active-run guard, the scope of `--force` and `--yes`, and recursive

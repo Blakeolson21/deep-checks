@@ -1,16 +1,16 @@
 <h1 align="center"><code>git push no-mistakes</code></h1>
 <p align="center">
-  <a href="https://github.com/Blakeolson21/deep-checks/actions/workflows/release.yml"
+  <a href="https://github.com/Blakeolson21/no-slop/actions/workflows/release.yml"
     ><img
       alt="Release"
-      src="https://img.shields.io/github/actions/workflow/status/Blakeolson21/deep-checks/release.yml?style=flat-square&label=release"
+      src="https://img.shields.io/github/actions/workflow/status/Blakeolson21/no-slop/release.yml?style=flat-square&label=release"
   /></a>
   <a href="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue?style=flat-square"
     ><img
       alt="Platform"
       src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue?style=flat-square"
   /></a>
-  <a href="https://github.com/Blakeolson21/deep-checks/blob/main/LICENSE"
+  <a href="https://github.com/Blakeolson21/no-slop/blob/main/LICENSE"
     ><img
       alt="License"
       src="https://img.shields.io/badge/license-MIT-green?style=flat-square"
@@ -22,7 +22,7 @@
 <p align="center"><a href="README.md">English</a> · <strong>简体中文</strong></p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Blakeolson21/deep-checks/main/demo.gif" alt="no-mistakes demo" width="800" />
+  <img src="https://raw.githubusercontent.com/Blakeolson21/no-slop/main/demo.gif" alt="no-mistakes demo" width="800" />
 </p>
 
 `no-mistakes` 在你真实的远端前面放了一个本地 git 代理。

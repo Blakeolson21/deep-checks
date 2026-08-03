@@ -11,7 +11,7 @@ func newUpdateCmd() *cobra.Command {
 	var force bool
 	cmd := &cobra.Command{
 		Use:   "update",
-		Short: "Update no-mistakes and reset the daemon",
+		Short: "Self-update (disabled in this build; rebuild from source instead)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logLifecycleInvocation("update", force)

@@ -90,6 +90,8 @@ GitHub token used to authenticate updater release requests.
 
 When set, the updater sends the token as a Bearer authorization header for release metadata requests, including background update checks, and release asset downloads. `GITHUB_TOKEN` takes precedence over `GH_TOKEN`; when neither variable is set, these requests remain anonymous. The token is not printed, logged, or persisted.
 
+This variable has no effect in this build: self-update and its background checks are disabled, so no release request is ever made. See the [CLI reference](/no-mistakes/reference/cli/#no-mistakes-update).
+
 ## `GH_TOKEN`
 
 Fallback GitHub token used by `no-mistakes update` when `GITHUB_TOKEN` is unset or empty.
@@ -111,6 +113,8 @@ Disable background update checks.
 | Default | unset (checks enabled)                         |
 
 Update checks run on every CLI invocation except `update` itself and version queries (`--version` / `-v`, which stay side-effect-free), hit GitHub releases, cache the result in `$NM_HOME/update-check.json`, and print a one-line notification to stderr when a newer version is available. Dev builds (non-semver versions) suppress the check automatically.
+
+This variable has no effect in this build: self-update is disabled, so background checks never run whether or not it is set. See the [CLI reference](/no-mistakes/reference/cli/#no-mistakes-update).
 
 ## `XDG_DATA_HOME`
 

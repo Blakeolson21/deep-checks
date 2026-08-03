@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -171,6 +173,16 @@ func screenRevertedPipelineContent(ctx context.Context, dir, submitted, preDoc, 
 	if len(candidates) == 0 {
 		return nil, nil
 	}
+	// Map iteration order is randomized, and judgeDocumentReversal shows the
+	// judge only the first guardCandidateLimit entries. Without a total order
+	// here, two runs over the identical pair of commits can put different
+	// subsets in front of the judge and reach different verdicts.
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].file != candidates[j].file {
+			return candidates[i].file < candidates[j].file
+		}
+		return candidates[i].text < candidates[j].text
+	})
 
 	paths, err := changedPaths(ctx, dir, submitted, postDoc)
 	if err != nil {
@@ -285,7 +297,9 @@ Inspect the real diff yourself with git (` + "`git diff " + preDoc + ".." + post
 `)
 	fmt.Fprintf(&b, "A deterministic screen found %d substantive line(s) that earlier pipeline steps had added and this pass removed without reinstating them. The screen is tuned for recall and is wrong most of the time; it decides nothing. Candidates:\n", total)
 	for _, c := range candidates {
-		fmt.Fprintf(&b, "  - %s: %s\n", c.file, truncateGuardLine(c.text))
+		fmt.Fprintf(&b, "  - %s: %s\n",
+			sanitizePromptText(c.file),
+			truncateGuardLine(sanitizePromptText(c.text)))
 	}
 	if total > len(candidates) {
 		fmt.Fprintf(&b, "  ... and %d more not listed here\n", total-len(candidates))
@@ -407,5 +421,12 @@ func truncateGuardLine(s string) string {
 	if len(s) <= limit {
 		return s
 	}
-	return s[:limit] + "..."
+	// The result reaches both the judge prompt and runs.error, so cut back to a
+	// rune boundary rather than splitting a multi-byte character into invalid
+	// UTF-8.
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
 }

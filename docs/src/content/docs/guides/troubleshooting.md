@@ -79,11 +79,13 @@ If the socket file exists but nothing answers at all (a dead socket left behind 
 
 If you have multiple installs with different `NM_HOME` roots, each gets its own scoped service name (with a short suffix derived from the path). Make sure you're looking at the right one - `no-mistakes daemon status` reports which.
 
-## `no-mistakes update` refuses or aborts
+## `no-mistakes daemon stop` or `daemon restart` refuses
 
-Symptom: `update` refuses because active pipeline runs are in progress, prompts because the daemon is running from a different executable path, or aborts because the daemon executable path cannot be determined.
+Symptom: the command refuses because active pipeline runs are in progress and lists them.
 
-`update`, `daemon stop`, and `daemon restart` all refuse by default while pipeline runs are active and list the affected runs; [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the guard's exact rules, including why `-y`/`--yes` does not bypass it.
+`daemon stop` and `daemon restart` both refuse by default while pipeline runs are active and list the affected runs; [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the guard's exact rules, including why `-y`/`--yes` does not bypass it.
+
+`no-mistakes update` is not a way around a stale install here: self-update is disabled in this build, and the [CLI reference](/no-mistakes/reference/cli/#no-mistakes-update) owns the rebuild-from-source path that replaces it.
 
 First inspect each listed run with `no-mistakes axi status --run <id>`.
 A parked CI gate can clear itself after its PR becomes terminal, including after a daemon restart.
@@ -95,8 +97,7 @@ Do not edit `state.sqlite` directly.
 Only when you have confirmed it is acceptable for every remaining listed active run to fail, force the lifecycle operation:
 
 ```sh
-no-mistakes daemon stop --force
-no-mistakes update
+no-mistakes daemon restart --force
 ```
 
 ## Agent binary not detected

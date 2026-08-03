@@ -5,7 +5,7 @@ description: Background process management, worktrees, state, and recovery.
 
 The daemon is a long-running background process that manages pipeline runs. The
 installer prefers setting it up as a managed background service, and
-`no-mistakes`, `init`, `attach`, `rerun`, and `update` keep that service
+`no-mistakes`, `init`, `attach`, and `rerun` keep that service
 installed and running for you when that path is available.
 
 ## Why a daemon exists
@@ -27,7 +27,7 @@ flowchart LR
   run --> cleanup["Cleanup when run finishes"]
 ```
 
-On macOS this is a per-user `launchd` agent, on Linux a per-user `systemd` service, and on Windows a Task Scheduler task. The installed artifact names are scoped by `NM_HOME` with a short stable suffix, so the paths and service identifiers look like `~/Library/LaunchAgents/com.kunchenguid.no-mistakes.daemon.<suffix>.plist`, `~/.config/systemd/user/no-mistakes-daemon-<suffix>.service`, and the Windows task `no-mistakes-daemon-<suffix>`. That keeps multiple `no-mistakes` installs from colliding when they use different `NM_HOME` roots. Those service managers keep the daemon available across CLI invocations and restart it after `no-mistakes update` replaces the binary. A managed service starts with a minimal environment, so at daemon startup it resolves `PATH` and proxy variables from your login shell and the baked-in service definition; [Environment the daemon sees](/no-mistakes/reference/environment/#environment-the-daemon-sees) owns that resolution story. Restart the daemon after changing those values. If managed service install or startup is unavailable or fails, `no-mistakes` falls back to starting a detached daemon process instead.
+On macOS this is a per-user `launchd` agent, on Linux a per-user `systemd` service, and on Windows a Task Scheduler task. The installed artifact names are scoped by `NM_HOME` with a short stable suffix, so the paths and service identifiers look like `~/Library/LaunchAgents/com.kunchenguid.no-mistakes.daemon.<suffix>.plist`, `~/.config/systemd/user/no-mistakes-daemon-<suffix>.service`, and the Windows task `no-mistakes-daemon-<suffix>`. That keeps multiple `no-mistakes` installs from colliding when they use different `NM_HOME` roots. Those service managers keep the daemon available across CLI invocations and restart it on demand after you replace the binary. A managed service starts with a minimal environment, so at daemon startup it resolves `PATH` and proxy variables from your login shell and the baked-in service definition; [Environment the daemon sees](/no-mistakes/reference/environment/#environment-the-daemon-sees) owns that resolution story. Restart the daemon after changing those values. If managed service install or startup is unavailable or fails, `no-mistakes` falls back to starting a detached daemon process instead.
 
 ## Starting and stopping
 
@@ -48,18 +48,11 @@ no-mistakes attach
 no-mistakes rerun
 no-mistakes axi run
 no-mistakes axi respond
-
-# Resets the daemon after replacing the binary
-no-mistakes update
 ```
 
-`no-mistakes update` stops and starts the daemon when it is running, or when stale daemon artifacts exist, so the new executable is used.
-It prefers the managed service path and falls back to a detached daemon if service startup is unavailable or fails.
-If pending or running pipeline runs exist, `update` refuses to restart the daemon by default and prints each active run's ID, status, branch, and short head SHA. Pass `--force` to restart the daemon anyway and accept that those runs may fail; `-y`/`--yes` does not bypass this guard.
-If the daemon is already running from a different executable path, update still prompts before replacing it; `-y`/`--yes` answers that prompt non-interactively.
-If the daemon executable path cannot be determined, the update aborts before replacing anything.
+`no-mistakes update` never resets the daemon in this build, because self-update is disabled and the binary is never replaced. After rebuilding from source, run `no-mistakes daemon restart` yourself; the [CLI reference](/no-mistakes/reference/cli/#no-mistakes-update) owns why the command is disabled.
 
-`no-mistakes daemon stop` and `no-mistakes daemon restart` apply the same guard: if pending or running pipeline runs exist, each refuses by default and lists the active runs, and each takes its own `--force` to proceed anyway.
+`no-mistakes daemon stop` and `no-mistakes daemon restart` guard against active work: if pending or running pipeline runs exist, each refuses by default, prints each active run's ID, status, branch, and short head SHA, and takes its own `--force` to proceed anyway. `-y`/`--yes` does not bypass this guard.
 That `--force` override is available only to an ordinary top-level caller. A
 process descended from an active validation-step agent cannot start, stop,
 restart, or update the daemon; recursive containment refuses the command before
@@ -138,7 +131,7 @@ log_level: debug # debug | info | warn | error
 
 ## Shutdown
 
-`no-mistakes daemon stop` stops the current daemon process without removing the managed service. The next `no-mistakes daemon start`, `no-mistakes`, `init`, `attach`, `rerun`, or `update` will start it again through the same service manager when available, or as a detached daemon otherwise.
+`no-mistakes daemon stop` stops the current daemon process without removing the managed service. The next `no-mistakes daemon start`, `no-mistakes`, `init`, `attach`, or `rerun` will start it again through the same service manager when available, or as a detached daemon otherwise.
 The [starting and stopping](#starting-and-stopping) section owns the active-run
 guard, the top-level `--force` override, and the separate validation-step
 containment rule.
