@@ -612,7 +612,7 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 	}
 
 	if objectExists(ctx, wd, preserved) && (local == preserved || isAncestor(ctx, wd, preserved, local)) {
-		if blocked, ok := s.anchorReachablePreserved(ctx, state, anchorRef, preserved); !ok {
+		if blocked, ok := s.anchorReachablePreserved(ctx, state, run.ID, anchorRef, preserved); !ok {
 			return blocked
 		}
 		return s.finishRecover(ctx, run, false)
@@ -989,22 +989,22 @@ func (s *Service) anchorStrandedPipelineHead(ctx context.Context, state State, r
 		return State{}, true
 	}
 	if objectExists(ctx, wd, preserved) {
-		return s.anchorReachablePreserved(ctx, state, anchorRef, preserved)
+		return s.anchorReachablePreserved(ctx, state, runID, anchorRef, preserved)
 	}
 	if gateDir == "" || !objectExists(ctx, gateDir, preserved) {
 		return State{}, true
 	}
 	stagingRef := "refs/no-mistakes/custody-anchor/" + runID
 	if _, err := git.Run(ctx, gateDir, "update-ref", stagingRef, preserved); err != nil {
-		return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the stranded pipeline head could not be staged in the local gate for preservation; no files or refs were changed"), false
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the stranded pipeline head could not be staged in the local gate for preservation; "+s.refusalRefClause(ctx, runID, state.Local.Head)), false
 	}
 	_, fetchErr := git.Run(ctx, wd, "fetch", "--no-tags", "--no-write-fetch-head", gateDir, "+"+stagingRef+":"+anchorRef)
 	_, _ = git.Run(ctx, gateDir, "update-ref", "-d", stagingRef)
 	if fetchErr != nil {
-		return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the stranded pipeline commits could not be fetched from the local gate; no files or refs were changed"), false
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the stranded pipeline commits could not be fetched from the local gate; "+s.refusalRefClause(ctx, runID, state.Local.Head)), false
 	}
 	if fetched, err := git.Run(ctx, wd, "rev-parse", anchorRef+"^{commit}"); err != nil || fetched != preserved {
-		return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the stranded pipeline commits could not be verified after anchoring; no files or refs were changed"), false
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the stranded pipeline commits could not be verified after anchoring; "+s.refusalRefClause(ctx, runID, state.Local.Head)), false
 	}
 	return State{}, true
 }
@@ -1029,29 +1029,29 @@ func (s *Service) anchorAbandonedGateHead(ctx context.Context, state State, runI
 	}
 	if objectExists(ctx, wd, gateHead) {
 		if _, err := git.Run(ctx, wd, "update-ref", ref, gateHead); err != nil {
-			return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the gate branch head this recovery would abandon could not be anchored locally; no files or refs were changed"), false
+			return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the gate branch head this recovery would abandon could not be anchored locally; "+s.refusalRefClause(ctx, runID, local)), false
 		}
 	} else {
 		gateDir := strings.TrimSpace(s.GateDir)
 		if gateDir == "" {
-			return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the gate branch head this recovery would abandon is not available locally and no gate is configured to fetch it from; no files or refs were changed"), false
+			return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the gate branch head this recovery would abandon is not available locally and no gate is configured to fetch it from; "+s.refusalRefClause(ctx, runID, local)), false
 		}
 		if err := git.FetchRemoteBranchToPrivateRef(ctx, wd, gateDir, state.Local.Branch, ref); err != nil {
-			return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", fmt.Sprintf("the gate branch head this recovery would abandon could not be fetched from the local gate; the gate branch and your worktree were not changed and only %s may have been written", ref)), false
+			return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the gate branch head this recovery would abandon could not be fetched from the local gate; "+s.refusalRefClause(ctx, runID, local)), false
 		}
 	}
 	if anchored, err := git.Run(ctx, wd, "rev-parse", ref+"^{commit}"); err != nil || anchored != gateHead {
-		return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", fmt.Sprintf("the gate branch head this recovery would abandon could not be verified after anchoring; the gate branch and your worktree were not changed and only %s may have been written", ref)), false
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the gate branch head this recovery would abandon could not be verified after anchoring; "+s.refusalRefClause(ctx, runID, local)), false
 	}
 	return State{}, true
 }
 
-func (s *Service) anchorReachablePreserved(ctx context.Context, state State, anchorRef, preserved string) (State, bool) {
+func (s *Service) anchorReachablePreserved(ctx context.Context, state State, runID, anchorRef, preserved string) (State, bool) {
 	if _, err := git.Run(ctx, s.workDir(), "update-ref", anchorRef, preserved); err != nil {
-		return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the preserved pipeline commits could not be anchored locally; no files or refs were changed"), false
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the preserved pipeline commits could not be anchored locally; "+s.refusalRefClause(ctx, runID, state.Local.Head)), false
 	}
 	if anchored, err := git.Run(ctx, s.workDir(), "rev-parse", anchorRef+"^{commit}"); err != nil || anchored != preserved {
-		return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the preserved pipeline commits could not be anchored locally; no files or refs were changed"), false
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the preserved pipeline commits could not be anchored locally; "+s.refusalRefClause(ctx, runID, state.Local.Head)), false
 	}
 	return State{}, true
 }

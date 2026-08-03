@@ -57,7 +57,7 @@ func renderLocalBranchStatus(state *branchsync.State, refreshing bool, width int
 		case branchsync.StateTargetChanged:
 			message = "The configured push target changed after the pipeline push. Synchronization is blocked."
 		case branchsync.StateCustodyReturned:
-			message = "Custody returned; the branch is yours. Start a fresh run when ready."
+			message = "Custody returned; the branch is yours. Start a fresh run when ready." + anchorNotice(state)
 		case branchsync.StateUserOwned:
 			message = "Run ended before the pipeline changed anything; the branch and head are yours and immediately usable."
 		default:
@@ -106,18 +106,37 @@ func recoverableBranchSync(state *branchsync.State) bool {
 	return state != nil && state.State == branchsync.StatePipelineOwned && state.Safety == "blocked_pipeline_owned_recoverable"
 }
 
+// anchorNotice names the private refs a recovery left holding commits the
+// branch does not contain, so the interactive surface reports exactly what the
+// structured surfaces do.
+func anchorNotice(state *branchsync.State) string {
+	if state == nil {
+		return ""
+	}
+	notice := ""
+	if state.PreservedAnchorRef != "" {
+		notice += fmt.Sprintf(" Pipeline commits this branch does not contain stay anchored at %s.", state.PreservedAnchorRef)
+	}
+	if state.AbandonedAnchorRef != "" {
+		notice += fmt.Sprintf(" The gate head this recovery let go stays anchored at %s.", state.AbandonedAnchorRef)
+	}
+	return notice
+}
+
 func renderRecoverConfirmation(state branchsync.State, width int) string {
 	if width < 40 {
 		width = 80
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "The run ended %s without publishing its pipeline commits. Recovery returns\n", state.Pipeline.Status)
-	fmt.Fprintf(&b, "custody by fast-forwarding a clean behind worktree, or by adopting a diverged\n")
-	fmt.Fprintf(&b, "preserved head only when it is proven to carry every local change.\n\n")
+	fmt.Fprintf(&b, "The run ended %s with the branch still in pipeline custody. Recovery returns\n", state.Pipeline.Status)
+	fmt.Fprintf(&b, "custody by fast-forwarding a clean behind worktree, by adopting a diverged\n")
+	fmt.Fprintf(&b, "preserved head only when it is proven to carry every local change, or\n")
+	fmt.Fprintf(&b, "in place - branch, worktree, and gate all untouched - when the gate never\n")
+	fmt.Fprintf(&b, "moved past the submitted head and the recorded pipeline head reached no ref.\n\n")
 	fmt.Fprintf(&b, "Local branch:   %s\n", state.Local.Branch)
 	fmt.Fprintf(&b, "Local HEAD:     %s\n", state.Local.Head)
 	fmt.Fprintf(&b, "Preserved HEAD: %s\n\n", state.Pipeline.CurrentHead)
-	b.WriteString("Dirty worktrees and divergence that cannot be proven contained refuse without changes; `no-mistakes sync --recover --keep-local` keeps the current head instead. `no-mistakes rerun` starts fresh validation from the gate head.")
+	b.WriteString("Dirty worktrees and divergence that cannot be proven contained refuse, leaving your branch, worktree, and gate branch exactly as they are and naming any private ref that holds rescued commits; `no-mistakes sync --recover --keep-local` keeps the current head instead. `no-mistakes rerun` starts fresh validation from the gate head.")
 	return renderBoxWithFooter("Confirm custody recovery", b.String(), width, "u/enter recover  ·  esc cancel")
 }
 

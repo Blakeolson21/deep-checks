@@ -228,6 +228,60 @@ func TestRecoverableCustodyActionFlowsThroughConfirmationAndRecoverService(t *te
 	}
 }
 
+// TestCustodyReturnedInPlaceNamesTheAnchorsHoldingLostWork: the frozen-gate
+// recovery returns custody with the branch, worktree, and gate all unmoved, so
+// the interactive surface reads as "nothing happened" unless it names the refs
+// holding what the branch does not carry - the pipeline commits rescued from
+// the gate object store, and the gate head the keep-local swap let go. The
+// confirmation the operator accepts before that path must describe it too.
+func TestCustodyReturnedInPlaceNamesTheAnchorsHoldingLostWork(t *testing.T) {
+	run := &ipc.RunInfo{ID: "run-1", Branch: "feature", Status: types.RunCancelled}
+	m := NewModel("socket", nil, run)
+	stranded := branchsync.State{
+		State: branchsync.StatePipelineOwned, Relation: branchsync.RelationUnknown, Safety: "blocked_pipeline_owned_recoverable",
+		Local:    branchsync.LocalState{Branch: "feature", Head: strings.Repeat("a", 40), Clean: true},
+		Pipeline: branchsync.PipelineState{RunID: "run-1", Status: "cancelled", Phase: "pre_push", CurrentHead: strings.Repeat("c", 40)},
+	}
+	m.branchSync = &stranded
+	m.syncRecover = func() branchsync.State {
+		recovered := stranded
+		recovered.State = branchsync.StateCustodyReturned
+		recovered.Safety = "custody_returned"
+		recovered.Relation = branchsync.RelationUnknown
+		recovered.Recovered = true
+		recovered.Changed = false
+		recovered.PreservedAnchorRef = "refs/no-mistakes/recover/run-1"
+		recovered.AbandonedAnchorRef = "refs/no-mistakes/recover-abandoned/run-1"
+		return recovered
+	}
+
+	nextModel, _ := m.handleKey(keyMsg("u"))
+	m = nextModel.(Model)
+	confirmation := stripANSI(m.View())
+	if !strings.Contains(confirmation, "in place") {
+		t.Errorf("confirmation does not describe the in-place custody return:\n%s", confirmation)
+	}
+
+	nextModel, cmd := m.handleKey(keyMsg("enter"))
+	m = nextModel.(Model)
+	if cmd == nil {
+		t.Fatal("recover did not wait for async command")
+	}
+	next, _ := m.Update(cmd())
+	m = next.(Model)
+
+	returned := stripANSI(renderLocalBranchStatus(m.branchSync, false, 100))
+	for _, want := range []string{
+		"Custody returned",
+		"refs/no-mistakes/recover/run-1",
+		"refs/no-mistakes/recover-abandoned/run-1",
+	} {
+		if !strings.Contains(returned, want) {
+			t.Errorf("custody-returned status missing %q:\n%s", want, returned)
+		}
+	}
+}
+
 // TestActivePipelineOwnedStateOffersNoRecoveryAction pins that the recovery
 // affordance never appears while the owning run is still active.
 func TestActivePipelineOwnedStateOffersNoRecoveryAction(t *testing.T) {

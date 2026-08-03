@@ -1990,6 +1990,45 @@ func TestRecoverFrozenGateRefusalNamesTheAnchorItWrote(t *testing.T) {
 	}
 }
 
+// TestRecoverAnchorFailureNamesTheAnchorAlreadyWritten covers the refusals
+// inside the anchor helpers themselves. The frozen-gate row rescues the
+// stranded pipeline head into refs/no-mistakes/recover/<run> before keep-local
+// tries to anchor the gate head it is about to abandon, so a failure there must
+// name the ref that already holds the rescued commits instead of claiming
+// nothing was written - telling the operator the wrong ref, or none, is how the
+// one exit that recovers that work becomes invisible.
+func TestRecoverAnchorFailureNamesTheAnchorAlreadyWritten(t *testing.T) {
+	f := newStrandedFixture(t)
+	mustRun(t, f.local, "reset", "--hard", f.base)
+	mustWrite(t, filepath.Join(f.local, "file.txt"), "feature, reworked locally\n")
+	mustRun(t, f.local, "commit", "-am", "reworked feature")
+
+	// A ref one level below the abandonment anchor makes Git refuse to create
+	// the anchor itself: the two names cannot coexist in the ref namespace.
+	blocker := "refs/no-mistakes/recover-abandoned/" + f.run.ID + "/blocker"
+	mustRun(t, f.local, "update-ref", blocker, f.base)
+
+	state := f.service.Recover(f.ctx, true)
+	if state.Recovered || state.Safety != "blocked_recover_preserve_failed" {
+		t.Fatalf("keep-local recover with an unwritable abandonment anchor = %#v", state)
+	}
+	if strings.Contains(state.Error, "no files or refs were changed") {
+		t.Fatalf("refusal claims it wrote no refs after rescuing the stranded head: %q", state.Error)
+	}
+	if !strings.Contains(state.Error, f.anchorRef()) {
+		t.Fatalf("refusal does not name the anchor holding the rescued pipeline commits: %q", state.Error)
+	}
+	if got := mustRun(t, f.local, "rev-parse", f.anchorRef()); got != f.preserved {
+		t.Fatalf("anchor holds %s, want the stranded pipeline head %s", got, f.preserved)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != f.submitted {
+		t.Fatalf("refused recovery moved the gate branch to %s", got)
+	}
+	if f.custodyReturned() {
+		t.Fatal("refusal stamped custody")
+	}
+}
+
 // TestRecoverKeepLocalRefusalLeavesNoAnchorBehind keeps refusal reporting
 // literal. The abandonment anchor may only be written once the recovery is
 // actually about to move the gate branch, and a refusal must describe exactly

@@ -24,7 +24,6 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, err
 	}
 	ctx := sctx.Ctx
-	newHeadSHA := ""
 	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
 		return nil, err
 	}
@@ -55,11 +54,6 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		if err != nil {
 			return nil, fmt.Errorf("commit agent changes: %w", err)
 		}
-		headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
-		if err != nil {
-			return nil, fmt.Errorf("resolve head after commit: %w", err)
-		}
-		newHeadSHA = headSHA
 	}
 
 	ref := normalizedBranchRef(sctx.Run.Branch)
@@ -126,10 +120,8 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, err
 	}
 
-	if newHeadSHA != "" {
-		if err := adoptBranchRef(sctx, newHeadSHA); err != nil {
-			return nil, err
-		}
+	if err := adoptBranchRef(sctx, headBeingPushed); err != nil {
+		return nil, err
 	}
 
 	// Persist the immutable source that was verified and delivered, never a
