@@ -342,7 +342,7 @@ func runAxiSync(cmd *cobra.Command, check, recover, keepLocal bool) error {
 		help = append(help, "Run `"+state.NextAction.Command+"`")
 	}
 	if state.Safety == "blocked_pipeline_owned_recoverable" {
-		help = append(help, "Run `no-mistakes rerun` instead to resume validating the preserved pipeline head")
+		help = append(help, "Run `no-mistakes rerun` instead to start a fresh validation from the gate branch head")
 	}
 	if len(help) > 0 {
 		fields = append(fields, toON.Field{Key: "help", Value: help})

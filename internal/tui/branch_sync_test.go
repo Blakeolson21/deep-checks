@@ -177,7 +177,7 @@ func TestRecoverableCustodyActionFlowsThroughConfirmationAndRecoverService(t *te
 	m.branchSync = &stranded
 
 	view := stripANSI(renderLocalBranchStatus(m.branchSync, false, 80))
-	for _, want := range []string{"preserved in the local gate", "Recover custody", "u recover custody"} {
+	for _, want := range []string{"in pipeline custody", "Recover custody", "u recover custody"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("recoverable status missing %q:\n%s", want, view)
 		}

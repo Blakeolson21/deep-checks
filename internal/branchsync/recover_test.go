@@ -187,8 +187,8 @@ func TestTerminalPrePushRunSurfacesGuardedCustodyRecovery(t *testing.T) {
 			if state.NextAction == nil || state.NextAction.Code != "recover_custody" || !strings.Contains(state.NextAction.Command, "sync --recover") {
 				t.Fatalf("next action = %#v", state.NextAction)
 			}
-			if !strings.Contains(state.Error, "preserved") {
-				t.Fatalf("error does not explain preservation: %q", state.Error)
+			if !strings.Contains(state.Error, "pipeline custody") {
+				t.Fatalf("error does not explain custody: %q", state.Error)
 			}
 		})
 	}

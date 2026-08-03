@@ -1488,7 +1488,7 @@ func (s *Service) classifyPipelineOwned(ctx context.Context, state *State, run *
 	state.Relation = relationBetween(ctx, s.workDir(), state.Local.Head, run.HeadSHA)
 	if terminalRunStatus(run.Status) {
 		state.Safety = "blocked_pipeline_owned_recoverable"
-		state.Error = "the run finished " + string(run.Status) + " with unpublished pipeline commits preserved in the local gate; recover custody before any local follow-up commit"
+		state.Error = "the run finished " + string(run.Status) + " with the branch still in pipeline custody; recover custody before any local follow-up commit - whatever survives of its unpublished pipeline commits is anchored during recovery"
 		state.NextAction = &NextAction{Code: "recover_custody", Command: "no-mistakes axi sync --recover"}
 		return
 	}
