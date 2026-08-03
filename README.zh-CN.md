@@ -61,6 +61,8 @@
 curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh
 ```
 
+> **注意：** 该安装脚本安装的是上游 `kunchenguid/no-mistakes` 构建，不包含本 fork 的本地补丁。若要保留这些补丁，请按[安装指南的 Update 一节](https://kunchenguid.github.io/no-mistakes/start-here/installation/#update)从 `Blakeolson21/no-slop` 检出并自行构建。
+
 Windows、Go install 以及从源码构建的说明，见[安装指南](https://kunchenguid.github.io/no-mistakes/start-here/installation/)。
 
 ## 快速上手

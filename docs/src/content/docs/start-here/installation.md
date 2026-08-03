@@ -70,12 +70,14 @@ See [Provider Integration](/no-mistakes/guides/provider-integration/) for PR and
 Rebuild from a checkout instead, then restart the daemon so it picks up the new executable:
 
 ```sh
-go build -o /tmp/no-mistakes ./cmd/no-mistakes
-mv /tmp/no-mistakes ~/.no-mistakes/bin/no-mistakes
+go build -o ~/.no-mistakes/bin/no-mistakes.new ./cmd/no-mistakes
+mv ~/.no-mistakes/bin/no-mistakes.new ~/.no-mistakes/bin/no-mistakes
 no-mistakes daemon restart
 ```
 
-Build to a temporary path and move it into place: building straight over the installed binary reuses that file whenever the link result is cached, which fails with `ETXTBSY` on Linux while the daemon is running it. The destination is the real binary from the layout above, not the symlink; adjust it for a non-default `NM_HOME` or a `go install` layout.
+Target the real binary from the layout above, not the symlink: `go build -o` leaves a symlink in place and truncates its target, which fails with `ETXTBSY` on Linux while the daemon is executing that file. Stage the build in the same directory so the `mv` is an atomic rename rather than a cross-filesystem copy from `/tmp`.
+
+The install directory comes from `NO_MISTAKES_INSTALL_DIR` and defaults to `~/.no-mistakes/bin`; `NM_HOME` does not affect it. A `go install` layout puts the binary in `GOBIN` instead.
 
 The [CLI reference](/no-mistakes/reference/cli/#no-mistakes-update) owns what the disabled command does with each flag; [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the active-run guard on the restart.
 

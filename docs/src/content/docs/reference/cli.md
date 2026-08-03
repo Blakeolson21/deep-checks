@@ -436,12 +436,16 @@ Every one of these invocations fails with an explanation instead of replacing th
 This build comes from the `Blakeolson21/no-slop` fork, which carries local patches that exist in no published release. Downloading a release archive over it would silently drop every one of them, and the fork publishes no release archives of its own, so rebuilding from source is the supported way to move it forward:
 
 ```sh
-go build -o /tmp/no-mistakes ./cmd/no-mistakes
-mv /tmp/no-mistakes ~/.no-mistakes/bin/no-mistakes
+go build -o ~/.no-mistakes/bin/no-mistakes.new ./cmd/no-mistakes
+mv ~/.no-mistakes/bin/no-mistakes.new ~/.no-mistakes/bin/no-mistakes
 no-mistakes daemon restart
 ```
 
-Build to a temporary path and move the result into place rather than building straight over the installed binary. `go build -o` reuses the existing file when the link result is already cached, and on Linux writing to a file that is currently executing fails with `ETXTBSY`; a rename never does. Move onto the real binary rather than the `~/.local/bin` symlink `command -v` reports, because replacing the symlink leaves the managed service pointed at the old executable. Adjust the destination for a non-default `NM_HOME` or a `go install` layout.
+Target the real binary, not the `~/.local/bin` symlink `command -v` reports. `go build -o` removes a regular destination before writing it, but it leaves a symlink in place and truncates whatever the link points at, which on Linux fails with `ETXTBSY` while the daemon is executing that file.
+
+Stage the build beside its destination rather than under `/tmp`, so the `mv` is a rename within one filesystem and replaces the binary atomically. `/tmp` is a separate tmpfs mount on most Linux systems, which silently degrades the move to a copy.
+
+The install directory comes from `NO_MISTAKES_INSTALL_DIR` and defaults to `~/.no-mistakes/bin`; `NM_HOME` does not affect it. A `go install` layout puts the binary in `GOBIN` instead.
 
 Because the binary is never replaced by the command itself, the daemon is never reset by it either; the restart above is what picks up a rebuild. [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the active-run guard that applies to it.
 
