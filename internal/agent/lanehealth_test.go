@@ -109,6 +109,84 @@ func TestWithLaneHealthRunsAgainOnceTheMarkExpires(t *testing.T) {
 	}
 }
 
+// The provider banner's own remedy ("purchase more credits") restores the same
+// account long before the reset it stated, but the mark suppresses the only
+// evidence that could undo it. One probe per interval bounds how long a stale
+// multi-day mark can keep a recovered lane unused.
+func TestWithLaneHealthProbesALongMarkAndClearsItWhenTheLaneRecovered(t *testing.T) {
+	now := time.Date(2026, 8, 4, 3, 44, 0, 0, time.Local)
+	store := laneTestStore(t, &now)
+	if err := store.Mark(lanehealth.Outage{
+		Lane:       "codex",
+		Until:      now.Add(4 * 24 * time.Hour),
+		ObservedAt: now,
+		Reason:     "You've hit your usage limit",
+	}); err != nil {
+		t.Fatalf("Mark: %v", err)
+	}
+	inner := &fallbackTestAgent{name: "codex", run: func() (*Result, error) {
+		return &Result{Text: "ok"}, nil
+	}}
+	lane := WithLaneHealth(inner, store, func() time.Time { return now })
+
+	if _, err := lane.Run(context.Background(), RunOpts{}); err == nil {
+		t.Fatalf("the mark must hold for its first interval")
+	}
+	if inner.calls != 0 {
+		t.Fatalf("inner calls = %d, want 0 inside the first interval", inner.calls)
+	}
+
+	now = now.Add(lanehealth.ProbeInterval)
+	res, err := lane.Run(context.Background(), RunOpts{})
+	if err != nil {
+		t.Fatalf("the probe must reach the lane: %v", err)
+	}
+	if res.Text != "ok" {
+		t.Fatalf("Text = %q, want ok", res.Text)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("inner calls = %d, want exactly 1 probe", inner.calls)
+	}
+	if outage, live := store.Outage("codex"); live {
+		t.Fatalf("a successful probe must clear the mark, still marked until %s", outage.Until)
+	}
+}
+
+// A probe that hits the banner again re-parks the lane for a fresh interval
+// instead of letting every later invocation through.
+func TestWithLaneHealthReparksWhenTheProbeHitsTheBannerAgain(t *testing.T) {
+	now := time.Date(2026, 8, 4, 3, 44, 0, 0, time.Local)
+	store := laneTestStore(t, &now)
+	if err := store.Mark(lanehealth.Outage{
+		Lane:       "codex",
+		Until:      now.Add(4 * 24 * time.Hour),
+		ObservedAt: now,
+		Reason:     "You've hit your usage limit",
+	}); err != nil {
+		t.Fatalf("Mark: %v", err)
+	}
+	inner := &fallbackTestAgent{name: "codex", run: func() (*Result, error) {
+		return nil, errors.New(codexQuotaStderr)
+	}}
+	lane := WithLaneHealth(inner, store, func() time.Time { return now })
+
+	now = now.Add(lanehealth.ProbeInterval)
+	if _, err := lane.Run(context.Background(), RunOpts{}); err == nil {
+		t.Fatalf("expected the probe to surface the banner again")
+	}
+	if inner.calls != 1 {
+		t.Fatalf("inner calls = %d, want 1", inner.calls)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := lane.Run(context.Background(), RunOpts{}); err == nil {
+			t.Fatalf("the re-marked lane must stay skipped")
+		}
+	}
+	if inner.calls != 1 {
+		t.Fatalf("inner calls = %d, want the lane skipped again after a failed probe", inner.calls)
+	}
+}
+
 // A lane that succeeds is demonstrably healthy, so any stale mark - including
 // one written from a misread banner - is dropped immediately.
 func TestWithLaneHealthClearsTheMarkOnSuccess(t *testing.T) {

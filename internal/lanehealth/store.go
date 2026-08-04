@@ -82,6 +82,51 @@ func (s *Store) Clear(lane string) error {
 	})
 }
 
+// ClaimProbe reports whether the caller may send one probe invocation through
+// a lane that is currently marked, and durably records the claim so concurrent
+// runs and later runs do not all probe the same lane at once.
+//
+// It answers true only when the claim was written, so a lock or write failure
+// keeps the lane skipped rather than turning every run into a probe. A mark
+// with no ObservedAt - a legacy row, or one written by hand - starts its probe
+// clock at the first claim instead of being probed immediately.
+func (s *Store) ClaimProbe(lane string) bool {
+	if s == nil || s.path == "" || lane == "" {
+		return false
+	}
+	now := s.now()
+	claimed := false
+	err := s.mutate(func(current *state) {
+		outage, ok := current.Lanes[lane]
+		if !ok || !outage.Until.After(now) {
+			return
+		}
+		since := lastProbeReference(outage)
+		if since.IsZero() {
+			outage.LastProbeAt = now
+			current.Lanes[lane] = outage
+			return
+		}
+		if now.Sub(since) < ProbeInterval {
+			return
+		}
+		outage.LastProbeAt = now
+		current.Lanes[lane] = outage
+		claimed = true
+	})
+	if err != nil {
+		return false
+	}
+	return claimed
+}
+
+func lastProbeReference(outage Outage) time.Time {
+	if outage.LastProbeAt.After(outage.ObservedAt) {
+		return outage.LastProbeAt
+	}
+	return outage.ObservedAt
+}
+
 // Snapshot returns every live outage, ordered by lane name.
 func (s *Store) Snapshot() []Outage {
 	if s == nil || s.path == "" {

@@ -137,7 +137,7 @@ func newDoctorCmd() *cobra.Command {
 					case len(missing) == 0 && exhausted:
 						warn(label, fmt.Sprintf("quota-exhausted until %s %s",
 							outage.Until.Local().Format("2006-01-02 15:04 MST"),
-							sDim.Render("(skipped by the pipeline until then)")))
+							sDim.Render("(skipped by the pipeline, probed hourly for early recovery)")))
 					case len(missing) == 0:
 						ok(label, strings.Join(found, ", "))
 					case len(a.binaries) > 1:
@@ -160,6 +160,14 @@ func newDoctorCmd() *cobra.Command {
 						if err := cfg.ResolveAgent(cmd.Context(), exec.LookPath); err != nil {
 							fail("gate validation", err.Error())
 							allOK = false
+						} else if outage, exhausted := laneOutages[string(cfg.Agent)]; exhausted {
+							// Reporting the resolved gate agent as runnable while the
+							// Agents section reports the same lane parked reads as
+							// "it is fine", which is the one thing it is not.
+							warn("gate validation", fmt.Sprintf("%s is runnable but quota-exhausted until %s %s",
+								cfg.Agent,
+								outage.Until.Local().Format("2006-01-02 15:04 MST"),
+								sDim.Render("(delete "+p.LaneHealthFile()+" if that account's quota was already restored)")))
 						} else {
 							ok("gate validation", fmt.Sprintf("%s is runnable", cfg.Agent))
 						}

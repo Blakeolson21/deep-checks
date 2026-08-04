@@ -105,9 +105,10 @@ When an invocation fails with a provider quota-exhaustion banner, that entry is 
 The reset time comes from the provider's own banner when it states one, and otherwise defaults to one hour.
 The record is stored in `lane-health.json` under the daemon root, so concurrent runs and runs started after a daemon restart honor it too instead of each spending an agent launch to rediscover the same exhausted account.
 A successful invocation clears the record for that entry immediately.
+One invocation an hour is still let through a recorded entry to check whether it recovered early, so a reset the provider stated days out cannot keep an entry unused for longer than an hour after its quota is actually restored.
 If every configured entry is exhausted, the step fails with a message naming each entry and when it recovers.
-`no-mistakes doctor` reports a recorded entry as `quota-exhausted until <time>` in place of its binary path.
-The record describes the account that was signed in when the banner appeared, so if you switch that provider to a different account before the stated reset, delete `lane-health.json` to make the entry available again.
+`no-mistakes doctor` reports a recorded entry as `quota-exhausted until <time>` in place of its binary path, and says the same of the resolved gate agent when that is the recorded entry.
+The record describes the account that was signed in when the banner appeared, so if you switch that provider to a different account before the stated reset, delete `lane-health.json` to make the entry available again immediately rather than waiting for the next hourly check.
 
 ### acpx_path
 

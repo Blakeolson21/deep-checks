@@ -126,9 +126,13 @@ func TestClassifyRecognizesClaudeBanners(t *testing.T) {
 // whole day, parking a recovered lane for up to ~24h - the wrong-long direction
 // DefaultCooldown exists to avoid. now is explicit UTC so this holds on any host.
 func TestClassifyHonorsTheZoneTheBannerStates(t *testing.T) {
+	// Never skipped on a host that cannot load the zone: that host is exactly
+	// where the classifier would silently fall back to local time, so skipping
+	// would hide the degradation instead of reporting it. The embedded zone
+	// database (tzdata.go) is what makes this hold on Windows too.
 	chicago, err := time.LoadLocation("America/Chicago")
 	if err != nil {
-		t.Skipf("host cannot load America/Chicago: %v", err)
+		t.Fatalf("the classifier needs IANA zone names to resolve on every host: %v", err)
 	}
 	// Captured verbatim from claude-acct at 2026-08-04 10:24 CDT, when this
 	// change's own gate run found every lane exhausted.

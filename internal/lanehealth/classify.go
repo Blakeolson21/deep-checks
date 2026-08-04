@@ -35,16 +35,33 @@ const DefaultCooldown = time.Hour
 // DefaultCooldown rather than parking a lane for months.
 const MaxCooldown = 8 * 24 * time.Hour
 
+// ProbeInterval is how often one invocation is let through a marked lane to
+// test whether it recovered early.
+//
+// A mark can otherwise only be undone by the reset time it recorded, and the
+// evidence that would undo it - a successful invocation - is exactly what the
+// mark suppresses. So a stated reset days out is trusted from a single
+// observation with nothing able to correct it, even though the provider's own
+// remedy (buying credits, raising the plan) restores the same account
+// immediately. One probe per interval caps that staleness at the interval and
+// costs the same wasted spawn per lane per hour the wrong-short direction
+// already accepts.
+const ProbeInterval = DefaultCooldown
+
 // maxReasonRunes bounds the banner excerpt kept for the failure message so a
 // noisy stderr tail cannot grow the state file or the run error without limit.
 const maxReasonRunes = 200
 
 // Outage records that one agent lane is quota-exhausted until Until.
+//
+// LastProbeAt is when an invocation was last let through the mark to test for
+// early recovery; it is zero until the first probe is claimed.
 type Outage struct {
-	Lane       string    `json:"lane"`
-	Until      time.Time `json:"until"`
-	Reason     string    `json:"reason,omitempty"`
-	ObservedAt time.Time `json:"observed_at"`
+	Lane        string    `json:"lane"`
+	Until       time.Time `json:"until"`
+	Reason      string    `json:"reason,omitempty"`
+	ObservedAt  time.Time `json:"observed_at"`
+	LastProbeAt time.Time `json:"last_probe_at,omitempty"`
 }
 
 // quotaBanners are the provider strings that mean "this account cannot run

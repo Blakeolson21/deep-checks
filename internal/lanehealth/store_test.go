@@ -147,3 +147,104 @@ func TestStorePrunesExpiredEntriesOnWrite(t *testing.T) {
 		t.Fatalf("expired lane must be pruned from the state file, got %s", got)
 	}
 }
+
+// A mark can only be undone by the reset it recorded or by a successful
+// invocation, and the mark itself suppresses the invocation - so a reset stated
+// days out would never self-correct after the operator restores quota on the
+// same account, which is what the banner's own "purchase more credits" remedy
+// does. One probe per interval bounds that.
+func TestStoreClaimsOneProbePerIntervalThroughALongMark(t *testing.T) {
+	now := mustTime(t, "2026-08-04 03:44")
+	store := testStore(t, &now)
+	if err := store.Mark(Outage{
+		Lane:       "codex",
+		Until:      now.Add(4 * 24 * time.Hour),
+		ObservedAt: now,
+		Reason:     "usage limit",
+	}); err != nil {
+		t.Fatalf("Mark: %v", err)
+	}
+
+	if store.ClaimProbe("codex") {
+		t.Fatalf("the mark must be trusted for its first interval")
+	}
+	now = now.Add(ProbeInterval - time.Minute)
+	if store.ClaimProbe("codex") {
+		t.Fatalf("a probe must not be claimed before the interval elapses")
+	}
+	now = now.Add(time.Minute)
+	if !store.ClaimProbe("codex") {
+		t.Fatalf("a probe must be claimed once the interval has elapsed")
+	}
+	// The claim is durable, so concurrent runs and later runs do not all probe.
+	if store.ClaimProbe("codex") {
+		t.Fatalf("a second probe must not be claimed inside the same interval")
+	}
+	if NewStore(store.path, func() time.Time { return now }).ClaimProbe("codex") {
+		t.Fatalf("another process must observe the claim already spent")
+	}
+	if _, live := store.Outage("codex"); !live {
+		t.Fatalf("claiming a probe must not clear the mark")
+	}
+
+	now = now.Add(ProbeInterval)
+	if !store.ClaimProbe("codex") {
+		t.Fatalf("the next interval must allow another probe")
+	}
+}
+
+// Re-marking a lane restarts its probe clock: the new banner is fresh evidence.
+func TestStoreRemarkRestartsTheProbeClock(t *testing.T) {
+	now := mustTime(t, "2026-08-04 03:44")
+	store := testStore(t, &now)
+	if err := store.Mark(Outage{Lane: "codex", Until: now.Add(72 * time.Hour), ObservedAt: now}); err != nil {
+		t.Fatalf("Mark: %v", err)
+	}
+	now = now.Add(ProbeInterval)
+	if !store.ClaimProbe("codex") {
+		t.Fatalf("expected the first probe to be claimed")
+	}
+	if err := store.Mark(Outage{Lane: "codex", Until: now.Add(72 * time.Hour), ObservedAt: now}); err != nil {
+		t.Fatalf("re-Mark: %v", err)
+	}
+	now = now.Add(ProbeInterval - time.Minute)
+	if store.ClaimProbe("codex") {
+		t.Fatalf("a fresh mark must be trusted for a full interval again")
+	}
+}
+
+// A row with no ObservedAt - written by an older build, or by hand - must start
+// its probe clock rather than be probed immediately.
+func TestStoreStartsTheProbeClockForAMarkWithNoObservationTime(t *testing.T) {
+	now := mustTime(t, "2026-08-04 03:44")
+	store := testStore(t, &now)
+	if err := store.Mark(Outage{Lane: "codex", Until: now.Add(72 * time.Hour)}); err != nil {
+		t.Fatalf("Mark: %v", err)
+	}
+	if store.ClaimProbe("codex") {
+		t.Fatalf("a mark with no observation time must not be probed on sight")
+	}
+	now = now.Add(ProbeInterval)
+	if !store.ClaimProbe("codex") {
+		t.Fatalf("the probe must become due one interval after the clock started")
+	}
+}
+
+func TestStoreClaimProbeRefusesUnmarkedAndExpiredLanes(t *testing.T) {
+	now := mustTime(t, "2026-08-04 03:44")
+	store := testStore(t, &now)
+	if store.ClaimProbe("codex") {
+		t.Fatalf("an unmarked lane needs no probe")
+	}
+	if err := store.Mark(Outage{Lane: "codex", Until: now.Add(time.Minute), ObservedAt: now}); err != nil {
+		t.Fatalf("Mark: %v", err)
+	}
+	now = now.Add(2 * time.Hour)
+	if store.ClaimProbe("codex") {
+		t.Fatalf("an expired mark is not a live outage to probe")
+	}
+	var nilStore *Store
+	if nilStore.ClaimProbe("codex") {
+		t.Fatalf("a nil store must never claim a probe")
+	}
+}

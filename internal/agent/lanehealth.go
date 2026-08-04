@@ -39,6 +39,7 @@ func (e *LaneOutageError) Unwrap() error { return e.cause }
 // an interface so tests and future callers can substitute their own.
 type LaneHealthStore interface {
 	Outage(lane string) (lanehealth.Outage, bool)
+	ClaimProbe(lane string) bool
 	Mark(outage lanehealth.Outage) error
 	Clear(lane string) error
 }
@@ -50,6 +51,12 @@ type LaneHealthStore interface {
 // Marking happens here rather than in the fallback wrapper so a single
 // configured agent - the default - also fails fast with a reset time instead
 // of spawning a process to be told it is out of quota.
+//
+// A marked lane is not sealed until its reset time: one invocation per
+// lanehealth.ProbeInterval is let through, and its success clears the mark. A
+// reset the provider stated days out is otherwise trusted from one observation
+// with no way to correct it, because the only evidence that could - a
+// completed invocation - is what the mark suppresses.
 type laneHealthAgent struct {
 	Agent
 	store LaneHealthStore
@@ -75,11 +82,17 @@ func WithLaneHealth(a Agent, store LaneHealthStore, now func() time.Time) Agent 
 func (l laneHealthAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	lane := l.Agent.Name()
 	if outage, down := l.store.Outage(lane); down {
-		err := &LaneOutageError{Lane: lane, Until: outage.Until, Reason: outage.Reason}
-		if opts.OnChunk != nil {
-			opts.OnChunk("\n" + err.Error() + "\n")
+		if !l.store.ClaimProbe(lane) {
+			err := &LaneOutageError{Lane: lane, Until: outage.Until, Reason: outage.Reason}
+			if opts.OnChunk != nil {
+				opts.OnChunk("\n" + err.Error() + "\n")
+			}
+			return nil, err
 		}
-		return nil, err
+		if opts.OnChunk != nil {
+			opts.OnChunk(fmt.Sprintf("\nagent lane %s is marked quota-exhausted until %s; sending one probe invocation to check for early recovery\n",
+				lane, outage.Until.Local().Format(resetTimeLayout)))
+		}
 	}
 
 	result, err := l.Agent.Run(ctx, opts)
