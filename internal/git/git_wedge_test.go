@@ -137,6 +137,59 @@ func TestRun_ReturnsWhenCancelledChildLeavesAPipeHolder(t *testing.T) {
 	}
 }
 
+// TestEveryPackageHelperBoundsItsGitChild covers the exec sites that do not go
+// through runInDir. Two of them, FindGitRoot and FindMainRepoRoot, take no
+// context at all and are the first two statements of branchsync's inspect,
+// which is the function named in the incident's own stack: a bound that reached
+// only runInDir left the reported failure fully reachable.
+func TestEveryPackageHelperBoundsItsGitChild(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call func(dir string)
+	}{
+		{"FindGitRoot", func(dir string) { _, _ = FindGitRoot(dir) }},
+		{"FindMainRepoRoot", func(dir string) { _, _ = FindMainRepoRoot(dir) }},
+		{"InitBare", func(dir string) { _ = InitBare(context.Background(), filepath.Join(dir, "new.git")) }},
+		{"IsDetachedHEAD", func(dir string) { _, _ = IsDetachedHEAD(context.Background(), dir) }},
+		{"RefExists", func(dir string) { _, _ = RefExists(context.Background(), dir, "refs/heads/main") }},
+		{"Run", func(dir string) { _, _ = Run(context.Background(), dir, "status", "--porcelain") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir := fakeGitDir(t)
+			pidFile := filepath.Join(binDir, "git.pid")
+			writeFakeGit(t, binDir, "echo $$ > "+pidFile+"\nexec /bin/sleep 600\n")
+			t.Cleanup(func() { reapPIDFile(pidFile) })
+
+			restore := defaultCommandTimeout
+			defaultCommandTimeout = 2 * time.Second
+			t.Cleanup(func() { defaultCommandTimeout = restore })
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				tc.call(t.TempDir())
+			}()
+
+			gitPID := readPID(t, pidFile)
+
+			const bound = 30 * time.Second
+			select {
+			case <-done:
+			case <-time.After(bound):
+				t.Fatalf("%s did not return within %s for a git child that never exits: an unbounded exec site blocks its caller forever and orphans the child", tc.name, bound)
+			}
+
+			deadline := time.Now().Add(5 * time.Second)
+			for pidAlive(gitPID) && time.Now().Before(deadline) {
+				time.Sleep(50 * time.Millisecond)
+			}
+			if pidAlive(gitPID) {
+				t.Fatalf("%s left git pid %d alive: an unbounded child reparents to init and spins there indefinitely", tc.name, gitPID)
+			}
+		})
+	}
+}
+
 func TestCommandTimeout_GivesNetworkSubcommandsTheLongerCeiling(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -148,6 +201,12 @@ func TestCommandTimeout_GivesNetworkSubcommandsTheLongerCeiling(t *testing.T) {
 		{"network behind a leading flag", []string{"--git-dir=/tmp/x.git", "fetch", "origin"}, networkCommandTimeout},
 		{"plumbing behind a leading flag", []string{"--git-dir=/tmp/x.git", "rev-parse", "HEAD"}, defaultCommandTimeout},
 		{"no subcommand", []string{"--version"}, defaultCommandTimeout},
+		// A global option whose value is a separate argument must not let that
+		// value pose as the subcommand; RefExists passes exactly this shape.
+		{"plumbing behind -C", []string{"-C", "/tmp/repo", "rev-parse", "HEAD"}, defaultCommandTimeout},
+		{"network behind -C", []string{"-C", "/tmp/repo", "fetch", "origin"}, networkCommandTimeout},
+		{"network behind separated --git-dir", []string{"--git-dir", "/tmp/x.git", "push", "origin"}, networkCommandTimeout},
+		{"network behind -c", []string{"-c", "gc.auto=0", "fetch", "origin"}, networkCommandTimeout},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := commandTimeout(tc.args); got != tc.want {

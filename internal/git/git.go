@@ -76,8 +76,12 @@ var (
 // commandWaitDelay bounds cmd.Wait after the process has exited or Cancel has
 // returned, so a surviving pipe holder - a credential helper or a hook that
 // inherited stdout - cannot wedge Wait indefinitely. It matches the shellenv
-// helper's backstop; it is a worst-case ceiling only, since a clean exit closes
-// the pipes immediately and Wait returns without waiting.
+// helper's backstop. It costs nothing in the ordinary case, where git's exit
+// closes the last pipe descriptor and Wait returns immediately. When a
+// descendant does outlive git holding that pipe, Wait returns
+// exec.ErrWaitDelay after the delay and the caller reports the command as
+// failed even though git itself succeeded; that misreport is the accepted
+// price of never wedging, and it is the exact case the delay exists for.
 const commandWaitDelay = 5 * time.Second
 
 // networkSubcommands reach a remote and get the longer ceiling. "remote" and
@@ -93,14 +97,29 @@ var networkSubcommands = map[string]struct{}{
 	"submodule": {},
 }
 
-// gitSubcommand returns the first non-flag argument, so a leading --git-dir=
-// (added by RunBare) does not hide the subcommand.
+// globalOptionsWithSeparateValue are the git global options whose value is its
+// own argument, so that value must not be mistaken for the subcommand. The
+// attached forms (--git-dir=<path>) need no entry, because they are a single
+// argument that already starts with "-".
+var globalOptionsWithSeparateValue = map[string]struct{}{
+	"-C":          {},
+	"-c":          {},
+	"--git-dir":   {},
+	"--work-tree": {},
+	"--namespace": {},
+}
+
+// gitSubcommand returns the first non-flag argument, so neither a leading
+// --git-dir= (added by RunBare) nor a `-C <dir>` pair hides the subcommand.
 func gitSubcommand(args []string) string {
-	for _, a := range args {
-		if strings.HasPrefix(a, "-") {
-			continue
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "-") {
+			return a
 		}
-		return a
+		if _, ok := globalOptionsWithSeparateValue[a]; ok {
+			i++
+		}
 	}
 	return ""
 }
@@ -112,24 +131,35 @@ func commandTimeout(args []string) time.Duration {
 	return defaultCommandTimeout
 }
 
-// runInDir executes git and returns trimmed stdout.
+// newCommand builds every git subprocess this package launches. It is the
+// single place the bound above is applied, because a bound that lives in only
+// one helper is not a bound: FindGitRoot and FindMainRepoRoot are the first
+// statements of branchsync's inspect and were themselves in the incident's
+// stack, so a wedge there is the same permanent orphan the deadline exists to
+// prevent. The returned cancel must be deferred by the caller.
 //
 // Cancelling the context kills git's own PID, which is exactly the process that
 // wedges in the case above. A grandchild of git that outlives it is a different
 // leak class, owned by the transitive process-tree reap in
 // docs/superpowers/specs/2026-07-25-process-tree-reap-design.md; commandWaitDelay
 // keeps such a survivor from wedging Wait here in the meantime.
-func runInDir(ctx context.Context, dir string, args ...string) (string, error) {
+func newCommand(ctx context.Context, args ...string) (*exec.Cmd, context.CancelFunc) {
+	cancel := context.CancelFunc(func() {})
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, commandTimeout(args))
-		defer cancel()
 	}
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-	cmd.Env = NonInteractiveEnv(dir)
 	cmd.WaitDelay = commandWaitDelay
 	winproc.Harden(cmd)
+	return cmd, cancel
+}
+
+// runInDir executes git and returns trimmed stdout.
+func runInDir(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd, cancel := newCommand(ctx, args...)
+	defer cancel()
+	cmd.Dir = dir
+	cmd.Env = NonInteractiveEnv(dir)
 	out, err := cmd.Output()
 	if err != nil {
 		stderr := ""
@@ -189,8 +219,8 @@ func isBareGitDir(dir string) bool {
 
 // InitBare creates a new bare git repository at the given path.
 func InitBare(ctx context.Context, path string) error {
-	cmd := exec.CommandContext(ctx, "git", "init", "--bare", path)
-	winproc.Harden(cmd)
+	cmd, cancel := newCommand(ctx, "init", "--bare", path)
+	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git init --bare: %w: %s", err, strings.TrimSpace(string(out)))
@@ -265,9 +295,9 @@ func FindGitRoot(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd, cancel := newCommand(context.Background(), "rev-parse", "--show-toplevel")
+	defer cancel()
 	cmd.Dir = abs
-	winproc.Harden(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("not a git repository: %s", abs)
@@ -307,9 +337,9 @@ func FindMainRepoRoot(path string) (string, error) {
 	}
 
 	// Resolve the git common dir.
-	commonDirCmd := exec.Command("git", "rev-parse", "--git-common-dir")
+	commonDirCmd, cancelCommonDir := newCommand(context.Background(), "rev-parse", "--git-common-dir")
+	defer cancelCommonDir()
 	commonDirCmd.Dir = abs
-	winproc.Harden(commonDirCmd)
 	commonDirOut, err := commonDirCmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("not a git repository: %s", abs)
@@ -330,8 +360,8 @@ func FindMainRepoRoot(path string) (string, error) {
 	// itself for its core.worktree, which git writes when it absorbs a
 	// submodule's git dir. The value is typically relative (e.g.
 	// "../../../sub"); resolve it against the common dir.
-	worktreeCmd := exec.Command("git", "--git-dir", commonDir, "config", "--get", "core.worktree")
-	winproc.Harden(worktreeCmd)
+	worktreeCmd, cancelWorktree := newCommand(context.Background(), "--git-dir", commonDir, "config", "--get", "core.worktree")
+	defer cancelWorktree()
 	if worktreeOut, err := worktreeCmd.Output(); err == nil {
 		worktree := strings.TrimSpace(string(worktreeOut))
 		if worktree != "" {
@@ -344,9 +374,9 @@ func FindMainRepoRoot(path string) (string, error) {
 
 	// Branch 3: exotic GIT_DIR without a usable core.worktree. Defer to
 	// `git rev-parse --show-toplevel` from the original path.
-	topCmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	topCmd, cancelTop := newCommand(context.Background(), "rev-parse", "--show-toplevel")
+	defer cancelTop()
 	topCmd.Dir = abs
-	winproc.Harden(topCmd)
 	topOut, err := topCmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("not a git repository: %s", abs)
@@ -455,9 +485,9 @@ func CurrentBranch(ctx context.Context, dir string) (string, error) {
 // (HEAD points at a commit rather than a branch ref). Uses `git symbolic-ref`
 // which fails cleanly when HEAD is not a symbolic ref.
 func IsDetachedHEAD(ctx context.Context, dir string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", "HEAD")
+	cmd, cancel := newCommand(ctx, "symbolic-ref", "-q", "HEAD")
+	defer cancel()
 	cmd.Dir = dir
-	winproc.Harden(cmd)
 	if err := cmd.Run(); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			// Exit 1 means HEAD is not a symbolic ref — detached.
@@ -682,9 +712,9 @@ func ResolveRef(ctx context.Context, dir, ref string) (string, error) {
 // `git rev-parse --verify --quiet` so a missing ref is a clean (nil, false)
 // result rather than a loud error.
 func RefExists(ctx context.Context, dir, ref string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	cmd, cancel := newCommand(ctx, "-C", dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	defer cancel()
 	cmd.Env = NonInteractiveEnv(dir)
-	winproc.Harden(cmd)
 	if err := cmd.Run(); err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && ee.ExitCode() == 1 {
