@@ -101,6 +101,10 @@ func TestRun_BoundsGitGivenADeadlineFreeContext(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected an error when git exceeded its bound")
 		}
+		// The kill route: Wait reports the process's own *exec.ExitError and
+		// drops the context error, so without explain rejoining it this reads as
+		// a bare "signal: killed" that never mentions the bound that fired.
+		assertNamesTheCeiling(t, err)
 	case <-time.After(bound):
 		t.Fatalf("git.Run did not return within %s for a git child that never exits under a deadline-free context: without a default bound the caller blocks forever and the child is orphaned when the caller is killed", bound)
 	}
@@ -205,19 +209,25 @@ func TestEveryPackageHelperBoundsItsGitChild(t *testing.T) {
 	}
 }
 
-// TestRun_WaitDelayExpiryExplainsTheDiscardedOutput covers the second bound's
-// diagnosis. git exits 0, a surviving descendant still holds the inherited
-// stdout pipe, the WaitDelay expires, and exec reports ErrWaitDelay while
-// DISCARDING the output of a command that actually succeeded. Callers here fail
-// closed on error, so this has to say what happened rather than surface as an
-// unexplained failure of a successful command.
-func TestRun_WaitDelayExpiryExplainsTheDiscardedOutput(t *testing.T) {
-	binDir := fakeGitDir(t)
+// writeFakeGitLeavingAPipeHolder writes a fake git that prints stdout, leaves a
+// descendant holding the inherited stdout pipe, and exits 0 itself. That is the
+// exact shape that expires the WaitDelay: the process is gone, but the pipe
+// stays open, so exec's copying goroutines never see EOF.
+func writeFakeGitLeavingAPipeHolder(t *testing.T, binDir, stdout string) {
+	t.Helper()
 	gpidFile := filepath.Join(binDir, "grandchild.pid")
-	// The background sleeper inherits git's stdout and outlives it; git itself
-	// exits 0 immediately.
-	writeFakeGit(t, binDir, "/bin/sleep 600 &\necho $! > "+gpidFile+"\nexit 0\n")
+	writeFakeGit(t, binDir, "echo '"+stdout+"'\n/bin/sleep 600 &\necho $! > "+gpidFile+"\nexit 0\n")
 	t.Cleanup(func() { reapPIDFile(gpidFile) })
+}
+
+// TestRun_WaitDelayExpiryNamesTheBoundThatFired covers the second bound's
+// diagnosis. git exits 0, a surviving descendant still holds the inherited
+// stdout pipe, and the WaitDelay expires, so exec reports ErrWaitDelay for a
+// command that actually succeeded. Callers here fail closed on error, so this
+// has to say which bound fired rather than surface as an unexplained failure.
+func TestRun_WaitDelayExpiryNamesTheBoundThatFired(t *testing.T) {
+	binDir := fakeGitDir(t)
+	writeFakeGitLeavingAPipeHolder(t, binDir, "M  tracked.go")
 
 	restoreDelay := commandWaitDelay
 	commandWaitDelay = time.Second
@@ -225,12 +235,45 @@ func TestRun_WaitDelayExpiryExplainsTheDiscardedOutput(t *testing.T) {
 
 	_, err := Run(context.Background(), t.TempDir(), "status", "--porcelain")
 	if err == nil {
-		t.Fatal("expected an error once the wait delay expired and exec discarded the output")
+		t.Fatal("expected an error once the wait delay expired")
 	}
 	if !errors.Is(err, exec.ErrWaitDelay) {
-		t.Errorf("error does not unwrap to exec.ErrWaitDelay, so a caller cannot tell a discarded-output bound from a real git failure: %v", err)
+		t.Errorf("error does not unwrap to exec.ErrWaitDelay, so a caller cannot tell this bound from a real git failure: %v", err)
 	}
-	if !strings.Contains(err.Error(), "discarded") {
-		t.Errorf("error does not say the output of a succeeding command was discarded: %v", err)
+	if !strings.Contains(err.Error(), "wait delay") {
+		t.Errorf("error does not name the wait delay that fired: %v", err)
+	}
+}
+
+// TestOutput_WaitDelayExpiryKeepsWhatExecAlreadyCopied pins the mechanism the
+// 60s delay is chosen against, because getting it wrong points at the wrong
+// mitigation. exec does not throw the captured output away on ErrWaitDelay: the
+// copying goroutine drains everything git wrote before blocking on the pipe the
+// descendant holds open, and Output returns that buffer alongside the error. So
+// the value at risk from a tight delay is not "the output is gone" but "the
+// output stopped being provably complete", which is why an expiry cannot be
+// passed through as success and the delay must instead be wide enough that
+// scheduler starvation never reaches it.
+func TestOutput_WaitDelayExpiryKeepsWhatExecAlreadyCopied(t *testing.T) {
+	binDir := fakeGitDir(t)
+	const line = "M  tracked.go"
+	writeFakeGitLeavingAPipeHolder(t, binDir, line)
+
+	restoreDelay := commandWaitDelay
+	commandWaitDelay = time.Second
+	t.Cleanup(func() { commandWaitDelay = restoreDelay })
+
+	dir := t.TempDir()
+	cmd := newCommand(context.Background(), "status", "--porcelain")
+	defer cmd.close()
+	cmd.setDir(dir)
+	cmd.setEnv(NonInteractiveEnv(dir))
+
+	out, err := cmd.output()
+	if !errors.Is(err, exec.ErrWaitDelay) {
+		t.Fatalf("expected exec.ErrWaitDelay from a git that exited 0 behind a surviving pipe holder, got %v", err)
+	}
+	if !strings.Contains(string(out), line) {
+		t.Errorf("exec discarded the output it had already copied, got %q: the 60s delay is justified by output that stops being provably complete, not by output that is thrown away", out)
 	}
 }

@@ -16,13 +16,13 @@ import (
 
 // TestCommandWaitDelay_StaysGenerousEnoughForALoadedHost guards a value that
 // reads like a tidy-up candidate but is load-bearing. When the delay expires,
-// exec reports ErrWaitDelay and discards the output of a git command that
-// exited 0, and callers in this package fail closed on error, so a tight delay
-// converts host load into a false "not clean" verdict that blocks custody
-// recovery. Verified directly: a command exiting 0 with a pipe-holding
-// descendant returns ErrWaitDelay and empty output. The delay therefore has to
-// clear scheduler starvation on a loaded host (the incident host sat at load
-// 160), not merely a fast local run.
+// exec force-closes the parent's pipes, abandons whatever had not been copied
+// yet, and reports ErrWaitDelay for a git command that exited 0; this package
+// returns ("", err) on any error, and callers here fail closed on it, so a
+// tight delay converts host load into a false "not clean" verdict that blocks
+// custody recovery. The delay is also what separates a merely starved copying
+// goroutine from a truncated read, so it has to clear scheduler starvation on a
+// loaded host (the incident host sat at load 160), not merely a fast local run.
 func TestCommandWaitDelay_StaysGenerousEnoughForALoadedHost(t *testing.T) {
 	const floor = 30 * time.Second
 	if commandWaitDelay < floor {
@@ -83,12 +83,16 @@ func TestCommandTimeout_GivesTreeMaterializingSubcommandsTheLongerCeiling(t *tes
 }
 
 // TestRun_CeilingExpiryNamesTheBoundThisPackageSupplied pins the diagnosis this
-// bounding exists to produce. When the derived ceiling fires, exec kills git and
-// cmd.Wait reports a bare *exec.ExitError "signal: killed" with the context
-// error dropped, which reads as if git itself died. Callers here fail closed on
+// bounding exists to produce. A ceiling expiry reaches the caller by two
+// different routes: before the fork it is context.DeadlineExceeded returned
+// straight out of exec.Cmd.Start, and after it exec kills git and Wait prefers
+// the process's own *exec.ExitError, dropping the context error so that
+// "signal: killed" reads as if git died on its own. Callers here fail closed on
 // that error - HasUncommittedChanges reads as "not clean" and blocks a custody
-// recovery - so an unattributed kill is the same undiagnosable failure the
-// permanent wedge was.
+// recovery - so both routes have to name the bound and carry the same cause,
+// and asserting that is what makes this test independent of which route a given
+// run happens to take. The kill route is exercised directly, with a real
+// process, by TestRun_BoundsGitGivenADeadlineFreeContext.
 func TestRun_CeilingExpiryNamesTheBoundThisPackageSupplied(t *testing.T) {
 	restore := defaultCommandTimeout
 	defaultCommandTimeout = time.Nanosecond
@@ -98,8 +102,15 @@ func TestRun_CeilingExpiryNamesTheBoundThisPackageSupplied(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error once the derived ceiling had already expired")
 	}
+	assertNamesTheCeiling(t, err)
+}
+
+// assertNamesTheCeiling is the contract both ceiling-expiry routes owe their
+// callers, shared so the kill route cannot drift away from the pre-fork route.
+func assertNamesTheCeiling(t *testing.T, err error) {
+	t.Helper()
 	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("error does not unwrap to context.DeadlineExceeded, so a caller cannot tell a bound from a git failure: %v", err)
+		t.Errorf("error does not unwrap to context.DeadlineExceeded, so a caller cannot tell this package's bound from a git failure: %v", err)
 	}
 	if !strings.Contains(err.Error(), "internal/git ceiling") {
 		t.Errorf("error does not name the ceiling this package supplied, leaving the failure undiagnosable: %v", err)

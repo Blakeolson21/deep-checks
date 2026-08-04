@@ -58,16 +58,30 @@ func RunBare(ctx context.Context, bareDir string, args ...string) (string, error
 // wedge inside the race runtime (__tsan::TraceSwitchPartImpl) before it ever
 // reaches execve. fork clones only the calling thread, so that child has no
 // working Go runtime - no scheduler, no sysmon, no timer thread - and therefore
-// its own -test.timeout watchdog can never fire. The caller meanwhile blocks in
-// cmd.Wait forever. Observed: three such children spinning on a full core each
-// for 17+ hours against a 10m0s test timeout, after their parent's timeout
-// panicked it and reparented them to init.
+// its own -test.timeout watchdog can never fire. Observed: three such children
+// spinning on a full core each for 17+ hours against a 10m0s test timeout,
+// after their parent's timeout panicked it and reparented them to init.
 //
-// The bound cannot come from the child, so it comes from here. These are
-// deliberately generous ceilings for a pathological case, not pacing: git
-// plumbing in this codebase completes in seconds, and callers that need a
-// tighter bound pass their own deadline (branchsync uses 15s for its fetch).
-// They are vars so tests can shorten them.
+// What the ceiling reaches, and what it does not. It bounds every hang once the
+// child is running: a git that never exits, a git that stops making progress, a
+// cancelled git whose descendants linger. It does NOT reach the pre-execve
+// wedge described above. exec.Cmd.Start consults the context exactly once, in a
+// non-blocking select before the fork, and starts the goroutine that honors the
+// deadline and the WaitDelay only after os.StartProcess has returned. A child
+// that never reaches execve never closes its CLOEXEC status pipe, so the parent
+// blocks in syscall.forkExec's read of that pipe - still inside Start, with
+// c.Process nil and no cancellation watcher running - and no bound expressible
+// here applies. That also matches the incident's shape better than a stuck Wait
+// would: three simultaneous wedged children are three goroutines each stuck in
+// their own Start. Start cannot be abandoned without leaking the pipe and the
+// pid, so this limit is recorded rather than fixed; do not read the ceiling as
+// having excluded that cause.
+//
+// For everything Start does return from, the bound cannot come from the child,
+// so it comes from here. These are deliberately generous ceilings for a
+// pathological case, not pacing: git plumbing in this codebase completes in
+// seconds, and callers that need a tighter bound pass their own deadline
+// (branchsync uses 15s for its fetch). They are vars so tests can shorten them.
 var (
 	defaultCommandTimeout  = 5 * time.Minute
 	extendedCommandTimeout = 60 * time.Minute
@@ -79,20 +93,27 @@ var (
 // indefinitely. It costs nothing in the ordinary case, where git's exit closes
 // the last pipe descriptor and Wait returns immediately.
 //
-// When the delay does expire, exec reports exec.ErrWaitDelay and DISCARDS the
-// captured output even though git exited 0, so the caller reports a command
-// that actually succeeded as failed. Callers in this package fail closed on
-// error (`HasUncommittedChanges` failing reads as "not clean", which blocks a
-// custody recovery), so that misreport is a correctness bug rather than a
-// tolerable cost, and the delay must not be the thing that triggers it.
+// When the delay does expire, exec force-closes the parent's pipe descriptors,
+// abandons anything the copying goroutines had not read yet, and reports
+// exec.ErrWaitDelay even though git exited 0. It does not throw away what was
+// already copied - Output still returns the buffer it filled - but this package
+// returns ("", err) on any error, so a command that actually succeeded still
+// reaches the caller as a failure. Callers here fail closed on that
+// (`HasUncommittedChanges` failing reads as "not clean", which blocks a custody
+// recovery), so the misreport is a correctness bug rather than a tolerable
+// cost, and the delay must not be the thing that triggers it.
 //
 // Hence 60s rather than the 5s the shellenv helper uses for long-lived agent
-// commands. The delay has to clear any plausible scheduler starvation of the
-// reader goroutine on a badly loaded host, which is the exact condition this
-// whole fix concerns: the incident host sat at load 160. A legitimate pipe
-// close after a short git command takes microseconds, so the headroom is free,
-// and the pathological case it guards still ends in a bounded error instead of
-// a permanent wedge. Kept a var so tests can shorten it.
+// commands, and hence no attempt to pass the copied buffer through as success
+// on ErrWaitDelay: the delay is also the only thing standing between a merely
+// starved copying goroutine and a truncated read, so its expiry cannot be
+// treated as proof that the output is complete. The delay has to clear any
+// plausible scheduler starvation of that goroutine on a badly loaded host,
+// which is the exact condition this whole fix concerns: the incident host sat
+// at load 160. A legitimate pipe close after a short git command takes
+// microseconds, so the headroom is free, and the pathological case it guards
+// still ends in a bounded error instead of a permanent wedge. Kept a var so
+// tests can shorten it.
 var commandWaitDelay = 60 * time.Second
 
 // networkSubcommands reach a remote and get the longer ceiling. "remote" and
@@ -190,53 +211,71 @@ func newCommand(ctx context.Context, args ...string) *boundedCommand {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.WaitDelay = commandWaitDelay
 	winproc.Harden(cmd)
-	return &boundedCommand{Cmd: cmd, ctx: ctx, cancel: cancel, ceiling: ceiling}
+	return &boundedCommand{cmd: cmd, ctx: ctx, cancel: cancel, ceiling: ceiling}
 }
 
 // boundedCommand is a git subprocess carrying the bound this package supplied,
 // so the constructor that applies the bound is also the one that explains it.
 // ceiling is zero when the caller's own context already carried a deadline.
+//
+// The *exec.Cmd is held rather than embedded on purpose: embedding promotes
+// Run, Output, and CombinedOutput, and a call site that reached for one of them
+// would still get the ceiling and the WaitDelay but would silently skip
+// explain, compiling cleanly and reinstating the undiagnosable failure this
+// type exists to prevent. Keeping it unexported makes that a compile error.
 type boundedCommand struct {
-	*exec.Cmd
+	cmd     *exec.Cmd
 	ctx     context.Context
 	cancel  context.CancelFunc
 	ceiling time.Duration
 }
+
+func (c *boundedCommand) setDir(dir string) { c.cmd.Dir = dir }
+
+func (c *boundedCommand) setEnv(env []string) { c.cmd.Env = env }
 
 func (c *boundedCommand) close() { c.cancel() }
 
 // explain names the bound that produced a failure, because both bounds
 // otherwise surface as something the caller cannot act on.
 //
-// A ceiling kill arrives as *exec.ExitError "signal: killed" with the context
-// error dropped, which reads like git itself died. An expired WaitDelay arrives
-// as exec.ErrWaitDelay after git exited 0, and exec DISCARDS the captured
-// output in that case, so the caller sees a failure for a command that
-// succeeded. Callers in this package fail closed on error, so both need to say
-// which bound fired: the whole point of bounding these subprocesses is to turn
-// a permanent unexplained wedge into a diagnosable error.
+// A ceiling expiry reaches the caller two ways. Before the fork it is
+// context.DeadlineExceeded straight out of Start; after it, exec kills git and
+// Wait prefers the process's own *exec.ExitError over the watcher's error, so
+// the context error is dropped and "signal: killed" reads as if git died on its
+// own. The ceiling branch therefore joins context.DeadlineExceeded back in, so
+// both paths carry the same cause and unwrap the same way.
+//
+// An expired WaitDelay arrives as exec.ErrWaitDelay after git exited 0,
+// carrying whatever exec had already copied but no guarantee that it is
+// complete. Callers in this package fail closed on error, so both bounds need
+// to say which one fired: the whole point of bounding these subprocesses is to
+// turn a permanent unexplained wedge into a diagnosable error.
 func (c *boundedCommand) explain(err error) error {
 	if err == nil {
 		return nil
 	}
 	if c.ceiling > 0 && errors.Is(c.ctx.Err(), context.DeadlineExceeded) {
-		return fmt.Errorf("exceeded the %s internal/git ceiling: %w", c.ceiling, err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("exceeded the %s internal/git ceiling: %w", c.ceiling, err)
+		}
+		return fmt.Errorf("exceeded the %s internal/git ceiling: %w: %w", c.ceiling, context.DeadlineExceeded, err)
 	}
 	if errors.Is(err, exec.ErrWaitDelay) {
-		return fmt.Errorf("git exited but a surviving child held its output pipe past the %s wait delay, so its output was discarded: %w", commandWaitDelay, err)
+		return fmt.Errorf("git exited but a surviving child held its output pipe past the %s wait delay, so its output could not be confirmed complete: %w", commandWaitDelay, err)
 	}
 	return err
 }
 
-func (c *boundedCommand) run() error { return c.explain(c.Cmd.Run()) }
+func (c *boundedCommand) run() error { return c.explain(c.cmd.Run()) }
 
 func (c *boundedCommand) output() ([]byte, error) {
-	out, err := c.Cmd.Output()
+	out, err := c.cmd.Output()
 	return out, c.explain(err)
 }
 
 func (c *boundedCommand) combinedOutput() ([]byte, error) {
-	out, err := c.Cmd.CombinedOutput()
+	out, err := c.cmd.CombinedOutput()
 	return out, c.explain(err)
 }
 
@@ -244,8 +283,8 @@ func (c *boundedCommand) combinedOutput() ([]byte, error) {
 func runInDir(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := newCommand(ctx, args...)
 	defer cmd.close()
-	cmd.Dir = dir
-	cmd.Env = NonInteractiveEnv(dir)
+	cmd.setDir(dir)
+	cmd.setEnv(NonInteractiveEnv(dir))
 	out, err := cmd.output()
 	if err != nil {
 		stderr := ""
@@ -384,7 +423,7 @@ func FindGitRoot(path string) (string, error) {
 	}
 	cmd := newCommand(context.Background(), "rev-parse", "--show-toplevel")
 	defer cmd.close()
-	cmd.Dir = abs
+	cmd.setDir(abs)
 	out, err := cmd.output()
 	if err != nil {
 		return "", fmt.Errorf("not a git repository: %s: %w", abs, err)
@@ -426,7 +465,7 @@ func FindMainRepoRoot(path string) (string, error) {
 	// Resolve the git common dir.
 	commonDirCmd := newCommand(context.Background(), "rev-parse", "--git-common-dir")
 	defer commonDirCmd.close()
-	commonDirCmd.Dir = abs
+	commonDirCmd.setDir(abs)
 	commonDirOut, err := commonDirCmd.output()
 	if err != nil {
 		return "", fmt.Errorf("not a git repository: %s: %w", abs, err)
@@ -463,7 +502,7 @@ func FindMainRepoRoot(path string) (string, error) {
 	// `git rev-parse --show-toplevel` from the original path.
 	topCmd := newCommand(context.Background(), "rev-parse", "--show-toplevel")
 	defer topCmd.close()
-	topCmd.Dir = abs
+	topCmd.setDir(abs)
 	topOut, err := topCmd.output()
 	if err != nil {
 		return "", fmt.Errorf("not a git repository: %s: %w", abs, err)
@@ -574,7 +613,7 @@ func CurrentBranch(ctx context.Context, dir string) (string, error) {
 func IsDetachedHEAD(ctx context.Context, dir string) (bool, error) {
 	cmd := newCommand(ctx, "symbolic-ref", "-q", "HEAD")
 	defer cmd.close()
-	cmd.Dir = dir
+	cmd.setDir(dir)
 	if err := cmd.run(); err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
@@ -802,7 +841,7 @@ func ResolveRef(ctx context.Context, dir, ref string) (string, error) {
 func RefExists(ctx context.Context, dir, ref string) (bool, error) {
 	cmd := newCommand(ctx, "-C", dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
 	defer cmd.close()
-	cmd.Env = NonInteractiveEnv(dir)
+	cmd.setEnv(NonInteractiveEnv(dir))
 	if err := cmd.run(); err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && ee.ExitCode() == 1 {
