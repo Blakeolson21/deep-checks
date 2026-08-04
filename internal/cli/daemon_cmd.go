@@ -18,10 +18,11 @@ import (
 )
 
 var (
-	daemonRun         = daemon.Run
-	daemonStartFn     = daemon.Start
-	daemonStopFn      = daemon.Stop
-	daemonIsRunningFn = daemon.IsRunning
+	daemonRun               = daemon.Run
+	daemonStartFn           = daemon.Start
+	daemonStopFn            = daemon.Stop
+	daemonIsRunningFn       = daemon.IsRunning
+	daemonProvablyStoppedFn = daemon.ProvablyStopped
 )
 
 func newDaemonCmd() *cobra.Command {
@@ -360,12 +361,19 @@ func guardDestructiveDaemonLifecycle(p *paths.Paths, stderr io.Writer, action st
 	// A health probe that errors has not proven the daemon is down. Assume it
 	// is up so runs are classified on their own evidence rather than written
 	// off as idle: this guard's job is to fail closed.
+	//
+	// Positive proof of death is the one thing that outranks that assumption.
+	// An unclean death leaves a socket file with nothing listening, which is
+	// precisely the shape that makes the probe error, so without this the
+	// leftover rows of the crashed run read as "executing a step" and the
+	// operator is told to pass --abandon-executing-runs to a daemon whose
+	// recorded process no longer exists.
 	runs, err := lifecycle.ClassifyActiveRuns(p, func() bool {
 		alive, err := daemonIsRunningFn(p)
-		if err != nil {
-			return true
+		if err == nil {
+			return alive
 		}
-		return alive
+		return !daemonProvablyStoppedFn(p)
 	})
 	if err != nil {
 		return fmt.Errorf("check active pipeline runs: %w", err)

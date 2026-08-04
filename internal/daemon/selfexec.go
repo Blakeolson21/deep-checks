@@ -525,6 +525,31 @@ func IsRunning(p *paths.Paths) (bool, error) {
 	return daemonHealthCheck(p)
 }
 
+// ProvablyStopped reports positive evidence that no daemon is serving this
+// root, established from process and endpoint state rather than the IPC health
+// probe.
+//
+// IsRunning cannot answer this on its own. An unclean death leaves the socket
+// file behind with nothing listening, so the dial fails and IsRunning returns
+// an error: it has proven only that it could not reach a daemon, which is why
+// the destructive lifecycle guards fail closed and assume a daemon is up when
+// the probe errors. That assumption strands the operator, because an unclean
+// death mid-run is exactly the state those guards then read as "a run is
+// executing a step". This distinguishes unreachable from dead: the recorded
+// pid no longer exists and nothing is serving the endpoint, so no daemon is
+// driving anything and startup recovery owns the rows it left behind.
+func ProvablyStopped(p *paths.Paths) bool {
+	if alive, err := daemonHealthCheck(p); err == nil && alive {
+		return false
+	}
+	pid, err := ReadPID(p)
+	if err != nil {
+		return false
+	}
+	gone, err := recordedDaemonProvablyGone(p, pid)
+	return err == nil && gone
+}
+
 func daemonIsRunningViaIPC(p *paths.Paths) (bool, error) {
 	client, err := ipc.Dial(p.Socket())
 	if err != nil {
@@ -771,14 +796,7 @@ func staleDaemonArtifacts(p *paths.Paths) (bool, error) {
 		}
 		return false, err
 	}
-	running, err := daemonProcessRunning(pid)
-	if err != nil {
-		return false, err
-	}
-	if missingSocket && running {
-		return false, nil
-	}
-	return !running, nil
+	return recordedDaemonProvablyGone(p, pid)
 }
 
 func daemonSocketAcceptingConnections(path string) (bool, error) {
@@ -805,6 +823,13 @@ func daemonSocketAcceptingConnections(path string) (bool, error) {
 // exited before readiness with status 1. Waiting for the captured instance to
 // exit is what makes "daemon stopped" mean the daemon's resources are free.
 func waitForDaemonStop(p *paths.Paths, instance daemonInstance) error {
+	// A daemon that died uncleanly before this stop began is already stopped,
+	// and none of the evidence that proves it can change while we wait, so
+	// answer before paying the graceful-exit timeout for a process that is
+	// never going to exit.
+	if cleanupIfRecordedDaemonProvablyGone(p) {
+		return nil
+	}
 	deadline := time.Now().Add(daemonStopTimeout())
 	for time.Now().Before(deadline) {
 		alive, err := daemonHealthCheck(p)
@@ -825,9 +850,8 @@ func waitForDaemonStop(p *paths.Paths, instance daemonInstance) error {
 	pid, err := ReadPID(p)
 	switch {
 	case err == nil:
-		if alive, _ := daemonHealthCheck(p); !alive && recordedDaemonProvablyGone(p, pid) {
-			cleanupDaemonArtifacts(p)
-			slog.Info("daemon already dead; cleaned stale artifacts", "pid", pid)
+		// The daemon may also have died uncleanly while we were waiting.
+		if cleanupIfRecordedDaemonProvablyGone(p) {
 			return nil
 		}
 		if err := validateDaemonPIDFallback(p, pid); err != nil {
@@ -867,34 +891,75 @@ func waitForDaemonStop(p *paths.Paths, instance daemonInstance) error {
 }
 
 // recordedDaemonProvablyGone reports whether the pid-file daemon is dead with
-// nothing serving its socket, so a stop has nothing left to do but clear the
-// stale artifacts. It exists because the PID-kill fallback validates identity
-// via `ps -p <pid>`, which exits 1 for a nonexistent pid on macOS and Linux:
-// inspecting a dead daemon's start time fails, and treating that failure as an
-// inspection error made `daemon restart` refuse to stop a daemon that had
-// already died uncleanly (stale socket file plus dead recorded pid). Liveness
-// is therefore checked with the signal-0 probe first, which distinguishes
-// "gone" from "cannot inspect". The socket must also be provably dead: a
-// listener still accepting connections means some daemon is serving this
-// root, and removing its socket would orphan it.
-func recordedDaemonProvablyGone(p *paths.Paths, pid int) bool {
-	if pid <= 0 || pid == os.Getpid() {
-		return false
+// nothing serving its IPC endpoint, so a stop has nothing left to do but clear
+// the stale artifacts. It is the single owner of that question: both the
+// dial-failure path in stopDetachedDaemon (through staleDaemonArtifacts) and
+// the PID fallback in waitForDaemonStop answer it here, so the two stop paths
+// cannot disagree about whether a root is stale.
+//
+// It probes liveness with the signal-0 based process check first because the
+// PID-kill fallback validates identity via `ps -p <pid>`, which exits 1 for a
+// nonexistent pid on macOS and Linux: inspecting a dead daemon's start time
+// fails, and treating that failure as an inspection error made `daemon
+// restart` refuse to stop a daemon that had already died uncleanly (stale
+// socket file plus dead recorded pid). The signal-0 probe distinguishes "gone"
+// from "cannot inspect".
+//
+// A Unix domain socket carries a second, independent proof: a listener still
+// accepting connections means some daemon is serving this root, and removing
+// its socket would orphan it. The Windows endpoint is a regular file recording
+// a loopback address rather than something dialable by path, so no listener
+// proof exists there and process death is the whole answer - the rule that
+// endpoint has always used.
+func recordedDaemonProvablyGone(p *paths.Paths, pid int) (bool, error) {
+	if pid <= 0 {
+		return false, fmt.Errorf("invalid daemon pid %d", pid)
+	}
+	// Our own pid means the daemon runs in-process (a test harness driving
+	// RunWithResources in a goroutine), so it is by definition not gone.
+	if pid == os.Getpid() {
+		return false, nil
 	}
 	running, err := daemonProcessRunning(pid)
-	if err != nil || running {
+	if err != nil {
+		return false, err
+	}
+	if running {
+		return false, nil
+	}
+	if _, err := os.Stat(p.Socket()); err != nil {
+		if os.IsNotExist(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("stat daemon socket: %w", err)
+	}
+	if daemonEndpointUsesRegularFile() {
+		return true, nil
+	}
+	accepting, err := daemonSocketAcceptingConnections(p.Socket())
+	if err != nil {
+		return false, err
+	}
+	return !accepting, nil
+}
+
+// cleanupIfRecordedDaemonProvablyGone clears the artifacts of a daemon that is
+// already gone and reports whether it did, so a stop can finish immediately
+// instead of waiting out its whole timeout for a process that will never exit.
+func cleanupIfRecordedDaemonProvablyGone(p *paths.Paths) bool {
+	if alive, err := daemonHealthCheck(p); err == nil && alive {
 		return false
 	}
-	info, err := os.Stat(p.Socket())
+	pid, err := ReadPID(p)
 	if err != nil {
-		return os.IsNotExist(err)
+		return false
 	}
-	if info.Mode()&os.ModeSocket != 0 {
-		accepting, err := daemonSocketAcceptingConnections(p.Socket())
-		if err != nil || accepting {
-			return false
-		}
+	gone, err := recordedDaemonProvablyGone(p, pid)
+	if err != nil || !gone {
+		return false
 	}
+	cleanupDaemonArtifacts(p)
+	slog.Info("daemon already dead; cleaned stale artifacts", "pid", pid)
 	return true
 }
 

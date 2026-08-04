@@ -2,8 +2,12 @@ package cli
 
 import (
 	"errors"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -404,6 +408,75 @@ func TestDaemonStartProceedsWhenNoHealthyDaemonOwnsTheLeftoverRuns(t *testing.T)
 				t.Fatal("daemon start should start the daemon")
 			}
 		})
+	}
+}
+
+// An unclean daemon death is the ordinary way to reach leftover run rows, and
+// it leaves the exact artifacts that make the IPC health probe error rather
+// than answer: a socket file with nothing listening. Failing closed on that
+// error classified the dead daemon's rows as steps still executing, so the
+// operator recovering a crashed daemon was told to pass
+// --abandon-executing-runs to a daemon whose recorded process no longer
+// exists. Proof of death outranks an unproven probe.
+func TestDaemonRestartAfterUncleanDeathDoesNotDemandAbandoningExecutingRuns(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket setup is platform-specific")
+	}
+	// t.TempDir() embeds the test name, and sockaddr_un caps a bound socket
+	// path at 104 bytes on macOS, so this root has to stay short.
+	nmHome, err := os.MkdirTemp("", "nmcli")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(nmHome) })
+	t.Setenv("NM_HOME", nmHome)
+	p := paths.WithRoot(nmHome)
+	seedLifecycleRunAtStep(t, p, "feature-crashed", types.StepTest, types.StepStatusRunning)
+	seedUncleanDaemonDeath(t, p)
+
+	stopCalled := stubDaemonStop(t)
+	startCalled := stubDaemonStart(t)
+
+	out, err := executeCmd("daemon", "restart")
+	if err == nil {
+		t.Fatal("daemon restart should still refuse while leftover run rows exist")
+	}
+	refusal := out + err.Error()
+	if strings.Contains(refusal, "executing a step") || strings.Contains(refusal, "--abandon-executing-runs") {
+		t.Fatalf("a provably dead daemon cannot be executing a step, got output %q error %v", out, err)
+	}
+	if !strings.Contains(refusal, "--force") {
+		t.Fatalf("leftover rows should be recoverable with --force, got output %q error %v", out, err)
+	}
+
+	out, err = executeCmd("daemon", "restart", "--force")
+	if err != nil {
+		t.Fatalf("daemon restart --force should proceed after an unclean death, got %v (output %q)", err, out)
+	}
+	if !*stopCalled || !*startCalled {
+		t.Fatalf("daemon restart --force should restart the daemon; stop=%t start=%t", *stopCalled, *startCalled)
+	}
+}
+
+// seedUncleanDaemonDeath leaves the artifacts of a daemon killed without
+// teardown: a pid file naming a process that has already exited and been
+// reaped, and a socket file that was bound and then abandoned.
+func seedUncleanDaemonDeath(t *testing.T, p *paths.Paths) {
+	t.Helper()
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("spawn throwaway process: %v", err)
+	}
+	if err := os.WriteFile(p.PIDFile(), []byte(strconv.Itoa(cmd.Process.Pid)), 0o644); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: p.Socket(), Net: "unix"})
+	if err != nil {
+		t.Fatalf("bind socket: %v", err)
+	}
+	ln.SetUnlinkOnClose(false)
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close socket: %v", err)
 	}
 }
 
