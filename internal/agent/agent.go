@@ -265,11 +265,30 @@ func finalizeTextResult(agentName, text string, schema json.RawMessage, usage To
 
 	output, err := parseStructuredTextOutput(text, schema)
 	if err != nil {
-		return nil, fmt.Errorf("%s output parse: %w (output snippet: %q)", agentName, err, outputSnippet(text))
+		return nil, &OutputParseError{Agent: agentName, Snippet: outputSnippet(text), cause: err}
 	}
 
 	return &Result{Output: output, Text: text, Usage: usage, UsageReported: usage.Reported, CacheCreationReported: usage.CacheCreationReported}, nil
 }
+
+// OutputParseError reports that an agent's own final message could not be
+// parsed against the requested schema. It is the one adapter failure whose
+// text quotes AGENT-AUTHORED output rather than the provider's stderr or
+// structured error channel, so callers that classify provider text - notably
+// the lane-health quota classifier - must recognize it and skip it. A reviewed
+// repository that merely mentions a quota banner would otherwise be able to
+// park a healthy lane.
+type OutputParseError struct {
+	Agent   string
+	Snippet string
+	cause   error
+}
+
+func (e *OutputParseError) Error() string {
+	return fmt.Sprintf("%s output parse: %v (output snippet: %q)", e.Agent, e.cause, e.Snippet)
+}
+
+func (e *OutputParseError) Unwrap() error { return e.cause }
 
 // outputSnippet returns a trimmed, length-capped excerpt of agent output for
 // inclusion in parse-failure errors. Without it, errors like "invalid

@@ -15,10 +15,17 @@ import (
 )
 
 // writeQuotaExhaustedCodex replaces the codex lane with a stub that emits the
-// exact banner recorded in ~/.no-mistakes/state.sqlite during the 2026-08-04
-// incident and exits non-zero, and that appends one line per invocation so the
-// test can prove a later run never launched it.
-func writeQuotaExhaustedCodex(t *testing.T, h *Harness, callLog string) string {
+// banner recorded in ~/.no-mistakes/state.sqlite during the 2026-08-04 incident
+// and exits non-zero, and that appends one line per invocation so the test can
+// prove a later run never launched it.
+//
+// The banner's shape is pinned but its reset instant is built from the running
+// clock, three days out: a fixed date would be in the past soon after this test
+// was written, and Classify then falls back to DefaultCooldown, so the
+// assertion below would stop testing banner parsing and simply fail forever.
+// Three days stays well inside lanehealth.MaxCooldown. It returns that instant
+// so the assertion and the stub cannot drift apart.
+func writeQuotaExhaustedCodex(t *testing.T, h *Harness, callLog string) (string, time.Time) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("the quota stub is a POSIX shell script")
@@ -27,15 +34,24 @@ func writeQuotaExhaustedCodex(t *testing.T, h *Harness, callLog string) string {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		t.Fatalf("remove codex symlink: %v", err)
 	}
+	const bannerLayout = "Jan 2, 2006 3:04 PM"
+	printed := time.Now().Add(72 * time.Hour).Truncate(time.Minute).Format(bannerLayout)
+	// The classifier rebuilds the instant from the printed wall clock, so the
+	// expectation is read back the same way; across a DST transition the wall
+	// clock, not the original instant, is what it can recover.
+	reset, err := time.ParseInLocation(bannerLayout, printed, time.Local)
+	if err != nil {
+		t.Fatalf("parse banner reset %q: %v", printed, err)
+	}
 	script := "#!/bin/sh\n" +
 		"echo invoked >> " + shellQuote(callLog) + "\n" +
 		`printf "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage ` +
-		`to purchase more credits or try again at Aug 7th, 2026 11:06 PM.\n" >&2` + "\n" +
+		`to purchase more credits or try again at ` + printed + `.\n" >&2` + "\n" +
 		"exit 1\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write codex quota stub: %v", err)
 	}
-	return path
+	return path, reset
 }
 
 func codexCallCount(t *testing.T, callLog string) int {
@@ -62,7 +78,7 @@ func TestAgentLaneQuotaCooldownJourney(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude"})
 
 	callLog := filepath.Join(t.TempDir(), "codex-calls.log")
-	codexPath := writeQuotaExhaustedCodex(t, h, callLog)
+	codexPath, wantUntil := writeQuotaExhaustedCodex(t, h, callLog)
 
 	// Order the lanes codex-first so every agent invocation starts on the
 	// exhausted lane, which is the shape the incident had.
@@ -115,9 +131,8 @@ func TestAgentLaneQuotaCooldownJourney(t *testing.T) {
 	if !marked {
 		t.Fatalf("codex must be marked quota-exhausted, got %s", stateData)
 	}
-	// The banner names Aug 7th 2026 11:06 PM, so the parsed reset must be that
+	// The banner names an exact instant, so the parsed reset must be that
 	// instant rather than the conservative default.
-	wantUntil := time.Date(2026, 8, 7, 23, 6, 0, 0, time.Local)
 	if !outage.Until.Equal(wantUntil) {
 		t.Fatalf("codex reset time = %s, want the banner's stated %s", outage.Until, wantUntil)
 	}

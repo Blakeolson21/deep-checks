@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -175,6 +176,42 @@ func TestWithLaneHealthDoesNotMarkOnACancelledRun(t *testing.T) {
 	}
 	if _, ok := store.Outage("codex"); ok {
 		t.Fatalf("a cancelled run must not mark the lane")
+	}
+}
+
+// A schema-parse failure is the one adapter error whose text quotes the agent's
+// OWN final message, and reviewing a repository that merely mentions a quota
+// banner - this one does - would otherwise park a healthy lane for days on the
+// dated reset the quoted text carries.
+func TestWithLaneHealthIgnoresAQuotaBannerQuotedByAgentOutput(t *testing.T) {
+	now := time.Date(2026, 8, 4, 3, 44, 0, 0, time.Local)
+	store := laneTestStore(t, &now)
+	inner := &fallbackTestAgent{name: "codex", run: func() (*Result, error) {
+		return finalizeTextResult(
+			"codex",
+			"I reviewed the diff. It pins the provider string \"You've hit your usage limit. "+
+				"Visit https://chatgpt.com/codex/settings/usage to purchase more credits or "+
+				"try again at Aug 7th, 2026 11:06 PM.\" as a test fixture.",
+			json.RawMessage(`{"type":"object"}`),
+			TokenUsage{},
+		)
+	}}
+	lane := WithLaneHealth(inner, store, func() time.Time { return now })
+
+	_, err := lane.Run(context.Background(), RunOpts{})
+	if err == nil {
+		t.Fatalf("expected the parse failure to surface")
+	}
+	var parseErr *OutputParseError
+	if !errors.As(err, &parseErr) {
+		t.Fatalf("error %v must stay a *OutputParseError", err)
+	}
+	var outageErr *LaneOutageError
+	if errors.As(err, &outageErr) {
+		t.Fatalf("agent-authored text must not become a lane outage: %v", err)
+	}
+	if outage, ok := store.Outage("codex"); ok {
+		t.Fatalf("agent-authored text must not mark the lane (marked until %s)", outage.Until)
 	}
 }
 

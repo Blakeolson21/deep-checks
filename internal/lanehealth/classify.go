@@ -3,12 +3,14 @@
 // mid-run fallback can skip a dead lane instead of paying a full agent spawn
 // to rediscover it.
 //
-// The classifier only ever sees the text of a FAILED invocation, which the
-// adapters build from the provider's stderr and structured error channel
+// The classifier only ever sees the text of a FAILED invocation whose message
+// the adapters build from the provider's stderr and structured error channel
 // (see internal/agent/codex.go and claude.go) - never from agent-authored
 // stdout. That matters because the banner strings below appear verbatim in
 // reviewed source and in this package's own tests; matching agent output
-// would let a repository under review mark a healthy lane dead.
+// would let a repository under review mark a healthy lane dead. The one
+// adapter error that does quote the agent's own message, *agent.OutputParseError,
+// is excluded by the caller in internal/agent/lanehealth.go before it gets here.
 package lanehealth
 
 import (
@@ -116,7 +118,41 @@ var (
 	// "try again at 9:15 PM" / "resets 3pm"
 	clockResetRE   = regexp.MustCompile(`(?i)\b(?:try again at|resets?(?: at)?)\s+(\d{1,2})(?::(\d{2}))?\s*([AaPp])\.?[Mm]\b`)
 	relativePartRE = regexp.MustCompile(`(?i)(\d+)\s*([hm])`)
+	// Claude prints the reset zone right after the clock time, as in the real
+	// banner "You've hit your session limit - resets 10:50am (America/Chicago)".
+	// Only the slashed IANA form and UTC/GMT are accepted so a parenthesized
+	// word or path in surrounding stderr cannot be read as a zone.
+	bannerZoneRE = regexp.MustCompile(`\((UTC|GMT|[A-Za-z_]+/[A-Za-z_+0-9-]+(?:/[A-Za-z_+0-9-]+)?)\)`)
 )
+
+// bannerZoneWindow bounds how far past the reset phrase a stated zone may sit.
+// The provider prints it immediately after the time; anything further away
+// belongs to unrelated stderr.
+const bannerZoneWindow = 40
+
+// resetLocation returns the zone the banner states for a reset it printed at
+// matchEnd, falling back to the caller's zone when none is stated or the host
+// cannot load it. Discarding a stated zone is not neutral: reading a reset that
+// has already passed in its own zone as "not yet today" rolls it forward a full
+// day, which is exactly the wrong-long direction DefaultCooldown rejects.
+func resetLocation(text string, matchEnd int, fallback *time.Location) *time.Location {
+	if matchEnd < 0 || matchEnd > len(text) {
+		return fallback
+	}
+	tail := text[matchEnd:]
+	if len(tail) > bannerZoneWindow {
+		tail = tail[:bannerZoneWindow]
+	}
+	m := bannerZoneRE.FindStringSubmatch(tail)
+	if m == nil {
+		return fallback
+	}
+	loc, err := time.LoadLocation(m[1])
+	if err != nil || loc == nil {
+		return fallback
+	}
+	return loc
+}
 
 // parseResetTime extracts the provider's stated recovery time. A bare clock
 // time means the next occurrence of that local time, which is how both CLIs
@@ -140,7 +176,9 @@ func parseResetTime(text string, now time.Time) (time.Time, bool) {
 		}
 	}
 
-	if m := datedResetRE.FindStringSubmatch(text); m != nil {
+	if idx := datedResetRE.FindStringSubmatchIndex(text); idx != nil {
+		m := submatches(text, idx)
+		loc := resetLocation(text, idx[1], now.Location())
 		if month, ok := parseMonth(m[1]); ok {
 			day, dayErr := strconv.Atoi(m[2])
 			hour, hourOK := parseClockHour(m[4], m[6])
@@ -152,13 +190,13 @@ func parseResetTime(text string, now time.Time) (time.Time, bool) {
 				}
 			}
 			if dayErr == nil && hourOK {
-				year := now.Year()
+				year := now.In(loc).Year()
 				if m[3] != "" {
 					if parsed, err := strconv.Atoi(m[3]); err == nil {
 						year = parsed
 					}
 				}
-				candidate := time.Date(year, month, day, hour, minute, 0, 0, now.Location())
+				candidate := time.Date(year, month, day, hour, minute, 0, 0, loc)
 				// A dateless banner near a year boundary means the next occurrence.
 				if m[3] == "" && candidate.Before(now) {
 					candidate = candidate.AddDate(1, 0, 0)
@@ -168,16 +206,19 @@ func parseResetTime(text string, now time.Time) (time.Time, bool) {
 		}
 	}
 
-	if m := clockResetRE.FindStringSubmatch(text); m != nil {
+	if idx := clockResetRE.FindStringSubmatchIndex(text); idx != nil {
+		m := submatches(text, idx)
 		hour, ok := parseClockHour(m[1], m[3])
 		if ok {
+			loc := resetLocation(text, idx[1], now.Location())
 			minute := 0
 			if m[2] != "" {
 				if parsed, err := strconv.Atoi(m[2]); err == nil {
 					minute = parsed
 				}
 			}
-			candidate := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location())
+			there := now.In(loc)
+			candidate := time.Date(there.Year(), there.Month(), there.Day(), hour, minute, 0, 0, loc)
 			if !candidate.After(now) {
 				candidate = candidate.AddDate(0, 0, 1)
 			}
@@ -186,6 +227,20 @@ func parseResetTime(text string, now time.Time) (time.Time, bool) {
 	}
 
 	return time.Time{}, false
+}
+
+// submatches rebuilds the string groups FindStringSubmatch would have returned
+// from an index match, so a single pass yields both the groups and the offset
+// the stated zone is searched from.
+func submatches(text string, idx []int) []string {
+	groups := make([]string, len(idx)/2)
+	for i := range groups {
+		start, end := idx[2*i], idx[2*i+1]
+		if start >= 0 && end >= start {
+			groups[i] = text[start:end]
+		}
+	}
+	return groups
 }
 
 func parseClockHour(hourText, meridiem string) (int, bool) {

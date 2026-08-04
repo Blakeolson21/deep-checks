@@ -81,12 +81,10 @@ func TestClassifyRecognizesClaudeBanners(t *testing.T) {
 			want: mustTime(t, "2026-08-04 21:15"),
 		},
 		{
-			// Captured verbatim from claude-acct at 2026-08-04 10:24 CDT, when
-			// this change's own gate run found every lane exhausted. Note the
-			// lowercase meridiem with no space and the trailing zone in
-			// parentheses, neither of which the synthesized cases cover.
-			name: "session limit exactly as the CLI printed it",
-			text: "You've hit your session limit · resets 10:50am (America/Chicago)",
+			// The lowercase meridiem with no space is how the CLI actually
+			// prints it; the synthesized cases all use "9:15 PM".
+			name: "session limit with a lowercase unspaced meridiem",
+			text: "You've hit your session limit · resets 10:50am",
 			want: mustTime(t, "2026-08-04 10:50"),
 		},
 		{
@@ -120,6 +118,71 @@ func TestClassifyRecognizesClaudeBanners(t *testing.T) {
 				t.Fatalf("Until = %s, want %s", outage.Until, tc.want)
 			}
 		})
+	}
+}
+
+// The zone a banner states is part of the reset instant. Reading it in the
+// host's own zone instead rolls a reset that has already passed there forward a
+// whole day, parking a recovered lane for up to ~24h - the wrong-long direction
+// DefaultCooldown exists to avoid. now is explicit UTC so this holds on any host.
+func TestClassifyHonorsTheZoneTheBannerStates(t *testing.T) {
+	chicago, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Skipf("host cannot load America/Chicago: %v", err)
+	}
+	// Captured verbatim from claude-acct at 2026-08-04 10:24 CDT, when this
+	// change's own gate run found every lane exhausted.
+	const banner = "You've hit your session limit · resets 10:50am (America/Chicago)"
+
+	cases := []struct {
+		name string
+		now  time.Time
+		want time.Time
+	}{
+		{
+			name: "reset still ahead in its own zone",
+			// 14:00 UTC is 09:00 CDT, before the stated 10:50am.
+			now:  time.Date(2026, 8, 4, 14, 0, 0, 0, time.UTC),
+			want: time.Date(2026, 8, 4, 10, 50, 0, 0, chicago),
+		},
+		{
+			name: "reset already passed in its own zone",
+			// 16:00 UTC is 11:00 CDT, after the stated 10:50am.
+			now:  time.Date(2026, 8, 4, 16, 0, 0, 0, time.UTC),
+			want: time.Date(2026, 8, 5, 10, 50, 0, 0, chicago),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			outage, ok := Classify("claude", banner, tc.now)
+			if !ok {
+				t.Fatalf("expected %q to be recognized as a quota banner", banner)
+			}
+			if !outage.Until.Equal(tc.want) {
+				t.Fatalf("Until = %s, want %s", outage.Until, tc.want)
+			}
+		})
+	}
+}
+
+// A parenthesized path or word in surrounding stderr is not a zone, and a zone
+// far from the reset phrase belongs to something else.
+func TestClassifyIgnoresParentheticalsThatAreNotTheStatedZone(t *testing.T) {
+	now := time.Date(2026, 8, 4, 14, 0, 0, 0, time.UTC)
+	cases := []string{
+		"claude exited: exit status 1: You've hit your session limit · resets 10:50am (internal/agent)",
+		"claude exited: exit status 1: You've hit your session limit · resets 10:50am; " +
+			"the daemon log for this run was written in (America/Chicago)",
+	}
+	for _, text := range cases {
+		outage, ok := Classify("claude", text, now)
+		if !ok {
+			t.Fatalf("expected %q to be recognized as a quota banner", text)
+		}
+		want := time.Date(2026, 8, 5, 10, 50, 0, 0, time.UTC)
+		if !outage.Until.Equal(want) {
+			t.Fatalf("Until = %s, want the caller's zone %s", outage.Until, want)
+		}
 	}
 }
 

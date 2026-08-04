@@ -114,7 +114,7 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 		}
 		if i == len(candidates)-1 {
 			if len(outages) == len(candidates) {
-				return nil, allLanesExhausted(outages)
+				return nil, allLanesExhausted(outages, len(candidates) == len(a.agents))
 			}
 			return nil, err
 		}
@@ -133,7 +133,12 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 // to run. It deliberately does not wrap any single lane's outage: the whole
 // point is that no one lane is the answer, and a caller matching
 // *LaneOutageError would otherwise treat this as one recoverable lane.
-func allLanesExhausted(outages []*LaneOutageError) error {
+//
+// everyLane says whether the exhausted lanes were the whole configured set. A
+// session-scoped invocation is narrowed to the one lane that owns the session,
+// so claiming every configured lane is out would be false, and this message is
+// what gets logged as the resume-failure reason.
+func allLanesExhausted(outages []*LaneOutageError, everyLane bool) error {
 	parts := make([]string, 0, len(outages))
 	for _, outage := range outages {
 		part := fmt.Sprintf("%s until %s", outage.Lane, outage.Until.Local().Format(resetTimeLayout))
@@ -142,8 +147,12 @@ func allLanesExhausted(outages []*LaneOutageError) error {
 		}
 		parts = append(parts, part)
 	}
-	return fmt.Errorf("every configured agent lane is quota-exhausted, so this step has nowhere to run: %s",
-		strings.Join(parts, "; "))
+	subject := "every configured agent lane is"
+	if !everyLane {
+		subject = "every agent lane eligible for this invocation is"
+	}
+	return fmt.Errorf("%s quota-exhausted, so this step has nowhere to run: %s",
+		subject, strings.Join(parts, "; "))
 }
 
 func truncateRunes(text string, max int) string {

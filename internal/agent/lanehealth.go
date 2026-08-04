@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -93,6 +94,14 @@ func (l laneHealthAgent) Run(ctx context.Context, opts RunOpts) (*Result, error)
 		// A cancelled or timed-out run says nothing about the lane's quota, and
 		// its partial output may still carry a banner the provider had only
 		// warned about. Never park a lane on that evidence.
+		return result, err
+	}
+	var parseErr *OutputParseError
+	if errors.As(err, &parseErr) {
+		// A schema-parse failure is the one adapter error built from the agent's
+		// own final message, and that message can quote a banner verbatim - a
+		// review of this very repository does. Classifying it would park a
+		// healthy lane, so this failure never reaches the classifier.
 		return result, err
 	}
 	// Only a failed invocation is classified, and its text comes from the

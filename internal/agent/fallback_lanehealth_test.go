@@ -90,6 +90,44 @@ func TestFallbackFailsWithEveryLaneResetTimeWhenAllLanesAreExhausted(t *testing.
 	}
 }
 
+// A session-scoped invocation is narrowed to the one lane that owns the
+// session, so its failure must not claim every configured lane is out: that
+// sentence is what gets logged as the resume-failure reason, and the other
+// lanes were never tried.
+func TestFallbackDoesNotClaimEveryLaneWhenOnlyTheSessionLaneWasTried(t *testing.T) {
+	now := time.Date(2026, 8, 4, 3, 44, 0, 0, time.Local)
+	store := laneTestStore(t, &now)
+	clock := func() time.Time { return now }
+
+	codex := &fallbackTestAgent{name: "codex", resumable: true, run: func() (*Result, error) {
+		return nil, errors.New(codexQuotaStderr)
+	}}
+	claude := &fallbackTestAgent{name: "claude", run: func() (*Result, error) {
+		return &Result{Text: "ok"}, nil
+	}}
+	chain := NewFallback([]Agent{
+		WithLaneHealth(codex, store, clock),
+		WithLaneHealth(claude, store, clock),
+	})
+
+	_, err := chain.Run(context.Background(), RunOpts{
+		Session: &SessionRef{ID: "thread-1", Agent: "codex"},
+	})
+	if err == nil {
+		t.Fatalf("expected the session-scoped resume to fail")
+	}
+	if claude.calls != 0 {
+		t.Fatalf("claude calls = %d, want 0: a session-scoped run must not use another lane", claude.calls)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "codex") {
+		t.Fatalf("message %q must name the lane that was actually tried", msg)
+	}
+	if strings.Contains(msg, "every configured agent lane") {
+		t.Fatalf("message %q must not claim lanes it never tried were exhausted", msg)
+	}
+}
+
 // A last lane that fails for an ordinary reason must still surface that reason,
 // not be recast as a quota problem just because an earlier lane was exhausted.
 func TestFallbackKeepsANonQuotaFinalFailure(t *testing.T) {
