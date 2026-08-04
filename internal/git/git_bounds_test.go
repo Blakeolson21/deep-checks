@@ -104,6 +104,53 @@ func TestCommandTimeout_GivesHookRunningSubcommandsTheLongerCeiling(t *testing.T
 	}
 }
 
+// TestBoundContext_DerivesTheTierCeilingOnlyWhenTheCallerHasNone covers the
+// policy the packages that cannot route through newCommand depend on. The
+// pipeline steps resolve git through a step-scoped PATH and so build their own
+// command; if the exported policy did not derive a ceiling for a deadline-free
+// caller, or silently overrode a caller's own tighter window, those sites would
+// be bounded differently from every call inside this package.
+func TestBoundContext_DerivesTheTierCeilingOnlyWhenTheCallerHasNone(t *testing.T) {
+	t.Run("deadline-free plumbing gets the plumbing ceiling", func(t *testing.T) {
+		before := time.Now()
+		ctx, cancel := BoundContext(context.Background(), "rev-parse", "HEAD")
+		defer cancel()
+		assertCeilingWithin(t, ctx, before, defaultCommandTimeout)
+	})
+
+	t.Run("deadline-free network gets the extended ceiling", func(t *testing.T) {
+		before := time.Now()
+		ctx, cancel := BoundContext(context.Background(), "fetch", "--no-tags", "origin")
+		defer cancel()
+		assertCeilingWithin(t, ctx, before, extendedCommandTimeout)
+	})
+
+	t.Run("a caller's own deadline is left alone", func(t *testing.T) {
+		callerCtx, cancelCaller := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancelCaller()
+		want, _ := callerCtx.Deadline()
+
+		ctx, cancel := BoundContext(callerCtx, "fetch", "origin")
+		defer cancel()
+
+		got, ok := ctx.Deadline()
+		if !ok || !got.Equal(want) {
+			t.Errorf("deadline = %v (present %t), want the caller's own %v: widening a caller that deliberately bounded itself would undo its pacing", got, ok, want)
+		}
+	})
+}
+
+func assertCeilingWithin(t *testing.T, ctx context.Context, before time.Time, want time.Duration) {
+	t.Helper()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatalf("no deadline derived for a deadline-free caller: a git subprocess built on this context is unbounded and orphans its child when the caller dies")
+	}
+	if got := deadline.Sub(before); got < want || got > want+time.Minute {
+		t.Errorf("ceiling = %s, want %s", got, want)
+	}
+}
+
 // TestRun_CeilingExpiryNamesTheBoundThisPackageSupplied pins the diagnosis this
 // bounding exists to produce. A ceiling expiry reaches the caller by two
 // different routes: before the fork it is context.DeadlineExceeded returned

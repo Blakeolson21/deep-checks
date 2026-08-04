@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	nmgit "github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
@@ -110,7 +111,11 @@ func gitRepoIdentity(ctx context.Context, dir string) repoIdentity {
 }
 
 func gitOutput(ctx context.Context, dir string, args ...string) string {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	full := append([]string{"-C", dir}, args...)
+	ctx, cancel := nmgit.BoundContext(ctx, full...)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd.WaitDelay = nmgit.CommandWaitDelay()
 	winproc.Harden(cmd)
 	out, err := cmd.Output()
 	if err != nil {

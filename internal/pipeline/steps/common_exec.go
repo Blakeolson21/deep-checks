@@ -169,12 +169,44 @@ func stepCmd(sctx *pipeline.StepContext, name string, args ...string) *exec.Cmd 
 	return cmd
 }
 
+// boundedGitStep returns a copy of sctx whose context carries internal/git's
+// ceiling for these arguments. sctx.Ctx is the executor's context, which
+// descends from the IPC server's context.Background() and so carries no
+// deadline of its own - the exact shape that leaves a wedged git child blocking
+// its step goroutine forever and orphaned when the daemon dies. A caller that
+// already bounded itself (the CI poll loop's ls-remote) keeps its own window.
+func boundedGitStep(sctx *pipeline.StepContext, args ...string) (pipeline.StepContext, context.CancelFunc) {
+	ctx, cancel := git.BoundContext(sctx.Ctx, args...)
+	bounded := *sctx
+	bounded.Ctx = ctx
+	return bounded, cancel
+}
+
+// stepGitCmd builds every git subprocess the steps launch. It exists so the
+// ceiling and the WaitDelay are applied once here rather than per call site:
+// this runs in the pipeline worktree, where agent-spawned test workers and
+// build watchers demonstrably outlive their parent holding an inherited pipe,
+// so without the WaitDelay a cmd.Output() here can wedge on a descendant's open
+// pipe with no backstop at all. The returned cancel must be deferred.
+//
+// The bound is deliberately not pushed down into stepCmd, which also launches
+// the repository's configured test and lint commands - those are legitimately
+// long-running and are not git.
+func stepGitCmd(sctx *pipeline.StepContext, args ...string) (*exec.Cmd, context.CancelFunc) {
+	bounded, cancel := boundedGitStep(sctx, args...)
+	cmd := stepCmd(&bounded, "git", args...)
+	cmd.WaitDelay = git.CommandWaitDelay()
+	cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
+	return cmd, cancel
+}
+
 // stepGitRun runs git with the StepContext's environment plus the standard
 // non-interactive git overrides. It is like git.Run but respects sctx.Env so
-// step-scoped PATH and credential environment stay in effect.
+// step-scoped PATH and credential environment stay in effect, and it carries
+// the same bounds git.Run would supply.
 func stepGitRun(sctx *pipeline.StepContext, args ...string) (string, error) {
-	cmd := stepCmd(sctx, "git", args...)
-	cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
+	cmd, cancel := stepGitCmd(sctx, args...)
+	defer cancel()
 	out, err := cmd.Output()
 	if err != nil {
 		stderr := ""

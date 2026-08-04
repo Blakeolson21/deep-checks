@@ -223,17 +223,39 @@ func commandTimeout(args []string) time.Duration {
 // docs/superpowers/specs/2026-07-25-process-tree-reap-design.md; commandWaitDelay
 // keeps such a survivor from wedging Wait here in the meantime.
 func newCommand(ctx context.Context, args ...string) *boundedCommand {
-	cancel := context.CancelFunc(func() {})
 	var ceiling time.Duration
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		ceiling = commandTimeout(args)
-		ctx, cancel = context.WithTimeout(ctx, ceiling)
 	}
+	ctx, cancel := BoundContext(ctx, args...)
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.WaitDelay = commandWaitDelay
 	winproc.Harden(cmd)
 	return &boundedCommand{cmd: cmd, ctx: ctx, cancel: cancel, ceiling: ceiling}
 }
+
+// BoundContext and CommandWaitDelay expose this package's bounding policy to
+// the few places that must build a git subprocess themselves and so cannot come
+// through newCommand: the pipeline steps resolve git through a step-scoped PATH
+// (`stepGitCmd`), and the intent scanner and doctor probe run git outside a
+// repository this package owns. They are the same daemon-lifetime exposure -
+// a git child that never exits blocks its caller and is orphaned when the
+// caller dies - so they must carry the same bounds rather than a second,
+// drifting set. Anything inside this package uses newCommand instead.
+//
+// BoundContext derives the tiered ceiling only when ctx carries no deadline of
+// its own, so a caller that already bounded itself keeps its tighter pacing.
+// The returned cancel must be deferred.
+func BoundContext(ctx context.Context, args ...string) (context.Context, context.CancelFunc) {
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, commandTimeout(args))
+}
+
+// CommandWaitDelay is the cmd.WaitDelay every git subprocess must carry,
+// whoever builds it. The commandWaitDelay comment owns why it is this wide.
+func CommandWaitDelay() time.Duration { return commandWaitDelay }
 
 // boundedCommand is a git subprocess carrying the bound this package supplied,
 // so the constructor that applies the bound is also the one that explains it.

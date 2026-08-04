@@ -9,6 +9,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
@@ -46,7 +47,10 @@ func newDoctorCmd() *cobra.Command {
 					fail("git           ", "not found")
 					allOK = false
 				} else {
-					gitCmd := exec.Command("git", "--version")
+					gitCtx, cancelGit := git.BoundContext(cmd.Context(), "--version")
+					defer cancelGit()
+					gitCmd := exec.CommandContext(gitCtx, "git", "--version")
+					gitCmd.WaitDelay = git.CommandWaitDelay()
 					winproc.Harden(gitCmd)
 					out, err := gitCmd.Output()
 					if err != nil {
