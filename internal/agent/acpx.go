@@ -21,7 +21,12 @@ type acpxAgent struct {
 	rawCommand string
 }
 
-func (a *acpxAgent) Name() string { return "acp:" + a.target }
+func (a *acpxAgent) Name() string { return acpAgentName(a.target) }
+
+// acpAgentName builds the identity every ACP-driven agent reports, whatever
+// name the operator configured. LaneName resolves configured names through the
+// same helper so lane state is written and read under one key.
+func acpAgentName(target string) string { return "acp:" + target }
 
 func (a *acpxAgent) ReportsAgentAttempts() bool { return true }
 

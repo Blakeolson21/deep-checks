@@ -67,19 +67,36 @@ func (s *Store) Mark(outage Outage) error {
 	})
 }
 
-// Clear drops any mark for lane. A lane that just completed an invocation is
-// demonstrably healthy, so its mark - including one written from a misread
-// banner - must not outlive that evidence.
-func (s *Store) Clear(lane string) error {
+// ClearObservedBefore drops the mark for lane when it was observed no later
+// than startedAt. A lane that just completed an invocation is demonstrably
+// healthy, so its mark - including one written from a misread banner - must not
+// outlive that evidence.
+//
+// The cutoff is what makes the mark sticky across concurrent runs: an
+// invocation authorized before the provider ran out of quota still completes,
+// and its success says nothing about a banner another run hit while it was
+// streaming. Clearing that fresher mark would send the next run right back into
+// the dead lane, which is the burst this package exists to stop. A mark with no
+// ObservedAt - a legacy row, or one written by hand - carries no such evidence
+// and is always cleared.
+func (s *Store) ClearObservedBefore(lane string, startedAt time.Time) error {
 	if s == nil || s.path == "" || lane == "" {
 		return nil
 	}
-	if _, present := s.load().Lanes[lane]; !present {
+	current := s.load()
+	if !clearable(current, lane, startedAt) {
 		return nil
 	}
 	return s.mutate(func(current *state) {
-		delete(current.Lanes, lane)
+		if clearable(*current, lane, startedAt) {
+			delete(current.Lanes, lane)
+		}
 	})
+}
+
+func clearable(current state, lane string, startedAt time.Time) bool {
+	outage, present := current.Lanes[lane]
+	return present && !outage.ObservedAt.After(startedAt)
 }
 
 // ClaimProbe reports whether the caller may send one probe invocation through
@@ -90,34 +107,53 @@ func (s *Store) Clear(lane string) error {
 // keeps the lane skipped rather than turning every run into a probe. A mark
 // with no ObservedAt - a legacy row, or one written by hand - starts its probe
 // clock at the first claim instead of being probed immediately.
+//
+// Every invocation of a marked lane asks, and all but one per interval are
+// refused, so a refusal is decided from a lock-free read and takes the
+// exclusive lock only when it is going to write. Reading stale state can only
+// understate how long ago the last probe was, so no probe is lost, and the
+// decision is made again under the lock before anything is recorded.
 func (s *Store) ClaimProbe(lane string) bool {
 	if s == nil || s.path == "" || lane == "" {
 		return false
 	}
 	now := s.now()
+	if write, _ := probeDecision(s.load(), lane, now); !write {
+		return false
+	}
 	claimed := false
 	err := s.mutate(func(current *state) {
-		outage, ok := current.Lanes[lane]
-		if !ok || !outage.Until.After(now) {
+		write, claim := probeDecision(*current, lane, now)
+		if !write {
 			return
 		}
-		since := lastProbeReference(outage)
-		if since.IsZero() {
-			outage.LastProbeAt = now
-			current.Lanes[lane] = outage
-			return
-		}
-		if now.Sub(since) < ProbeInterval {
-			return
-		}
+		outage := current.Lanes[lane]
 		outage.LastProbeAt = now
 		current.Lanes[lane] = outage
-		claimed = true
+		claimed = claim
 	})
 	if err != nil {
 		return false
 	}
 	return claimed
+}
+
+// probeDecision reports whether lane's probe clock has to be written, and
+// whether that write is a claim the caller may probe on. Starting the clock for
+// a mark with no observation time is a write that is not a claim.
+func probeDecision(current state, lane string, now time.Time) (write, claim bool) {
+	outage, ok := current.Lanes[lane]
+	if !ok || !outage.Until.After(now) {
+		return false, false
+	}
+	since := lastProbeReference(outage)
+	if since.IsZero() {
+		return true, false
+	}
+	if now.Sub(since) < ProbeInterval {
+		return false, false
+	}
+	return true, true
 }
 
 func lastProbeReference(outage Outage) time.Time {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/lanehealth"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // resetTimeLayout renders a lane's recovery time in the operator's local zone,
@@ -41,7 +42,19 @@ type LaneHealthStore interface {
 	Outage(lane string) (lanehealth.Outage, bool)
 	ClaimProbe(lane string) bool
 	Mark(outage lanehealth.Outage) error
-	Clear(lane string) error
+	ClearObservedBefore(lane string, startedAt time.Time) error
+}
+
+// LaneName returns the key a configured agent name's lane health is recorded
+// under: the identity the constructed agent reports from Agent.Name(), which
+// for every ACP-driven agent is its target rather than the alias the operator
+// configured. Read surfaces must resolve through this so they cannot look up a
+// lane the pipeline never writes.
+func LaneName(name types.AgentName) string {
+	if target, ok := types.ACPTargetFor(name); ok {
+		return acpAgentName(target)
+	}
+	return string(name)
 }
 
 // laneHealthAgent skips an invocation entirely while its lane is known to be
@@ -81,6 +94,7 @@ func WithLaneHealth(a Agent, store LaneHealthStore, now func() time.Time) Agent 
 
 func (l laneHealthAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	lane := l.Agent.Name()
+	startedAt := l.now()
 	if outage, down := l.store.Outage(lane); down {
 		if !l.store.ClaimProbe(lane) {
 			err := &LaneOutageError{Lane: lane, Until: outage.Until, Reason: outage.Reason}
@@ -97,10 +111,12 @@ func (l laneHealthAgent) Run(ctx context.Context, opts RunOpts) (*Result, error)
 
 	result, err := l.Agent.Run(ctx, opts)
 	if err == nil {
-		// A completed invocation is direct evidence the lane works, so any
-		// surviving mark - including one written from a misread banner - is
-		// dropped rather than left to expire on its own.
-		_ = l.store.Clear(lane)
+		// A completed invocation is direct evidence the lane worked when it was
+		// authorized, so any mark that predates it - including one written from a
+		// misread banner - is dropped rather than left to expire on its own. A mark
+		// a concurrent run observed after this invocation started describes a later
+		// state of the account and survives.
+		_ = l.store.ClearObservedBefore(lane, startedAt)
 		return result, nil
 	}
 	if ctx.Err() != nil {

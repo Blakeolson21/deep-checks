@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -132,7 +133,7 @@ func newDoctorCmd() *cobra.Command {
 							found = append(found, path)
 						}
 					}
-					outage, exhausted := laneOutages[a.name]
+					outage, exhausted := laneOutages[agent.LaneName(types.AgentName(a.name))]
 					switch {
 					case len(missing) == 0 && exhausted:
 						warn(label, fmt.Sprintf("quota-exhausted until %s %s",
@@ -160,7 +161,7 @@ func newDoctorCmd() *cobra.Command {
 						if err := cfg.ResolveAgent(cmd.Context(), exec.LookPath); err != nil {
 							fail("gate validation", err.Error())
 							allOK = false
-						} else if outage, exhausted := laneOutages[string(cfg.Agent)]; exhausted {
+						} else if outage, exhausted := laneOutages[agent.LaneName(cfg.Agent)]; exhausted {
 							// Reporting the resolved gate agent as runnable while the
 							// Agents section reports the same lane parked reads as
 							// "it is fine", which is the one thing it is not.

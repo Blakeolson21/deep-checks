@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/lanehealth"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 const codexQuotaStderr = "codex exited: exit status 1: You've hit your usage limit. " +
@@ -211,6 +212,44 @@ func TestWithLaneHealthClearsTheMarkOnSuccess(t *testing.T) {
 	}
 }
 
+// A success is evidence about the moment the invocation ran, not about now: an
+// invocation authorized before the provider ran out of quota still completes,
+// and dropping the mark a concurrent run wrote while it was streaming sends the
+// next run straight back into the dead lane - the exact burst this package
+// exists to stop.
+func TestWithLaneHealthKeepsAMarkWrittenWhileTheInvocationWasRunning(t *testing.T) {
+	now := time.Date(2026, 8, 4, 3, 44, 0, 0, time.Local)
+	store := laneTestStore(t, &now)
+	until := now.Add(3 * time.Hour)
+	inner := &fallbackTestAgent{name: "codex", run: func() (*Result, error) {
+		// Five seconds in, a concurrent run's codex invocation is rejected with
+		// the banner and marks the lane.
+		now = now.Add(5 * time.Second)
+		if err := store.Mark(lanehealth.Outage{
+			Lane:       "codex",
+			Until:      until,
+			ObservedAt: now,
+			Reason:     "You've hit your usage limit",
+		}); err != nil {
+			t.Fatalf("concurrent Mark: %v", err)
+		}
+		now = now.Add(55 * time.Second)
+		return &Result{Text: "ok"}, nil
+	}}
+	lane := WithLaneHealth(inner, store, func() time.Time { return now })
+
+	if _, err := lane.Run(context.Background(), RunOpts{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	outage, live := store.Outage("codex")
+	if !live {
+		t.Fatalf("a mark observed after this invocation started must survive its success")
+	}
+	if !outage.Until.Equal(until) {
+		t.Fatalf("Until = %s, want the concurrent mark's %s", outage.Until, until)
+	}
+}
+
 func TestWithLaneHealthLeavesNonQuotaFailuresUnmarked(t *testing.T) {
 	now := time.Date(2026, 8, 4, 3, 44, 0, 0, time.Local)
 	store := laneTestStore(t, &now)
@@ -307,6 +346,37 @@ func TestWithLaneHealthForwardsCapabilities(t *testing.T) {
 	bare := WithLaneHealth(inner, nil, nil)
 	if bare != Agent(inner) {
 		t.Fatalf("wrapping without a store must return the agent unchanged")
+	}
+}
+
+// Lane state is written under the identity the constructed agent reports, so a
+// read surface resolving a configured name any other way silently misses the
+// outage. Building each configured name and comparing is what keeps the two
+// from drifting - an ACP alias reports its target, not the alias.
+func TestLaneNameMatchesTheIdentityTheConstructedAgentReports(t *testing.T) {
+	names := []types.AgentName{
+		types.AgentClaude,
+		types.AgentCodex,
+		types.AgentRovoDev,
+		types.AgentOpenCode,
+		types.AgentPi,
+		types.AgentCopilot,
+		types.AgentName("acp:gemini"),
+	}
+	for _, alias := range types.ACPAliases() {
+		names = append(names, alias.Name)
+	}
+	for _, name := range names {
+		built, err := New(name, "irrelevant-binary", nil)
+		if err != nil {
+			t.Fatalf("New(%q): %v", name, err)
+		}
+		if got, want := LaneName(name), built.Name(); got != want {
+			t.Errorf("LaneName(%q) = %q, want the agent's own %q", name, got, want)
+		}
+	}
+	if got := LaneName(types.AgentCursor); got != "acp:cursor" {
+		t.Errorf("LaneName(cursor) = %q, want acp:cursor", got)
 	}
 }
 

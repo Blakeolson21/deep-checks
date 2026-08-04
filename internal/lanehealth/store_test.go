@@ -65,17 +65,64 @@ func TestStoreOutageExpiresAtResetTime(t *testing.T) {
 	}
 }
 
-func TestStoreClearRemovesAMark(t *testing.T) {
+func TestStoreClearRemovesAMarkObservedBeforeTheInvocation(t *testing.T) {
+	now := mustTime(t, "2026-08-04 03:44")
+	store := testStore(t, &now)
+	if err := store.Mark(Outage{Lane: "codex", Until: now.Add(time.Hour), ObservedAt: now}); err != nil {
+		t.Fatalf("Mark: %v", err)
+	}
+	if err := store.ClearObservedBefore("codex", now.Add(time.Minute)); err != nil {
+		t.Fatalf("ClearObservedBefore: %v", err)
+	}
+	if _, ok := store.Outage("codex"); ok {
+		t.Fatalf("cleared lane must not report an outage")
+	}
+}
+
+// A mark with no observation time - a legacy row, or one written by hand -
+// carries no evidence about when it was seen, so a success still clears it.
+func TestStoreClearRemovesAMarkWithNoObservationTime(t *testing.T) {
 	now := mustTime(t, "2026-08-04 03:44")
 	store := testStore(t, &now)
 	if err := store.Mark(Outage{Lane: "codex", Until: now.Add(time.Hour)}); err != nil {
 		t.Fatalf("Mark: %v", err)
 	}
-	if err := store.Clear("codex"); err != nil {
-		t.Fatalf("Clear: %v", err)
+	if err := store.ClearObservedBefore("codex", now); err != nil {
+		t.Fatalf("ClearObservedBefore: %v", err)
 	}
 	if _, ok := store.Outage("codex"); ok {
-		t.Fatalf("cleared lane must not report an outage")
+		t.Fatalf("a mark with no observation time must be cleared by a success")
+	}
+}
+
+// The cooldown has to be sticky across overlapping runs: an invocation
+// authorized before the account ran out still completes, and its success is not
+// evidence about a banner another run hit while it was streaming.
+func TestStoreClearKeepsAMarkObservedAfterTheInvocationStarted(t *testing.T) {
+	now := mustTime(t, "2026-08-04 03:44")
+	store := testStore(t, &now)
+	startedAt := now
+	observedAt := now.Add(5 * time.Second)
+	if err := store.Mark(Outage{
+		Lane:       "codex",
+		Until:      now.Add(3 * time.Hour),
+		ObservedAt: observedAt,
+		Reason:     "usage limit",
+	}); err != nil {
+		t.Fatalf("Mark: %v", err)
+	}
+	now = observedAt.Add(time.Minute)
+	if err := store.ClearObservedBefore("codex", startedAt); err != nil {
+		t.Fatalf("ClearObservedBefore: %v", err)
+	}
+	if _, ok := store.Outage("codex"); !ok {
+		t.Fatalf("a mark observed after the invocation started must survive it")
+	}
+	if err := store.ClearObservedBefore("codex", observedAt); err != nil {
+		t.Fatalf("ClearObservedBefore at the observation: %v", err)
+	}
+	if _, ok := store.Outage("codex"); ok {
+		t.Fatalf("an invocation that started no earlier than the mark must clear it")
 	}
 }
 
@@ -124,8 +171,8 @@ func TestNilStoreIsSafe(t *testing.T) {
 	if err := store.Mark(Outage{Lane: "codex"}); err != nil {
 		t.Fatalf("nil store Mark: %v", err)
 	}
-	if err := store.Clear("codex"); err != nil {
-		t.Fatalf("nil store Clear: %v", err)
+	if err := store.ClearObservedBefore("codex", time.Now()); err != nil {
+		t.Fatalf("nil store ClearObservedBefore: %v", err)
 	}
 }
 
@@ -227,6 +274,58 @@ func TestStoreStartsTheProbeClockForAMarkWithNoObservationTime(t *testing.T) {
 	now = now.Add(ProbeInterval)
 	if !store.ClaimProbe("codex") {
 		t.Fatalf("the probe must become due one interval after the clock started")
+	}
+}
+
+// Every invocation of a marked lane asks for a probe, and all but one per
+// interval are refused. A refusal that still rewrites the state file makes the
+// common case pay a blocking lock plus an atomic replace for no state change,
+// and every replace is another window for a lock-free reader to race a rename.
+func TestStoreClaimProbeDoesNotRewriteStateWhenNoProbeIsDue(t *testing.T) {
+	now := mustTime(t, "2026-08-04 03:44")
+	store := testStore(t, &now)
+	if err := store.Mark(Outage{
+		Lane:       "codex",
+		Until:      now.Add(4 * 24 * time.Hour),
+		ObservedAt: now,
+		Reason:     "usage limit",
+	}); err != nil {
+		t.Fatalf("Mark: %v", err)
+	}
+	// The state file is replaced by rename, so a write gives the path a new
+	// identity; an unchanged identity means nothing was written.
+	before, err := os.Stat(store.path)
+	if err != nil {
+		t.Fatalf("stat state: %v", err)
+	}
+
+	now = now.Add(ProbeInterval - time.Minute)
+	for i := 0; i < 5; i++ {
+		if store.ClaimProbe("codex") {
+			t.Fatalf("a probe must not be claimed before the interval elapses")
+		}
+	}
+	if store.ClaimProbe("unmarked") {
+		t.Fatalf("an unmarked lane needs no probe")
+	}
+	after, err := os.Stat(store.path)
+	if err != nil {
+		t.Fatalf("stat state after refusals: %v", err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatalf("a refused probe must not rewrite the state file")
+	}
+
+	now = now.Add(time.Minute)
+	if !store.ClaimProbe("codex") {
+		t.Fatalf("a probe must still be claimed once the interval has elapsed")
+	}
+	claimed, err := os.Stat(store.path)
+	if err != nil {
+		t.Fatalf("stat state after claim: %v", err)
+	}
+	if os.SameFile(after, claimed) {
+		t.Fatalf("a claimed probe must be persisted")
 	}
 }
 
