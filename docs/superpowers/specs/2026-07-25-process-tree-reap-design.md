@@ -1,7 +1,8 @@
 # Transitive process-tree reap
 
 Date: 2026-07-25
-Status: approved, branch 1 of 3
+Status: branch 1 of 3 shipped. Branches 2 and 3 are approved but unbuilt; this
+document is their only tracker, because the repo tracks no issues. See "Follow-ups".
 
 ## Problem
 
@@ -27,7 +28,9 @@ codebase.
 
 `internal/agent/reap_unix_test.go` already documents this escape: its "escaped" helper
 calls `syscall.Setsid()`, and the test asserts only that the pipe closes, then SIGKILLs
-the escapee by hand in `t.Cleanup`. The bug is encoded as expected behavior.
+the escapee by hand in `t.Cleanup`. That was read at spec time as encoding the bug as
+expected behavior; on inspection it turned out to be blind to the escape rather than
+blessing it, and the correction is recorded under "Testing" below.
 
 ## Scope
 
@@ -213,5 +216,33 @@ code lands. The doc comments on `ConfigureShellCommand` and
 ## Bootstrapping risk
 
 This branch changes the reaper that the gate runs for branches 2 and 3 depend on.
-After each `nm-smart-run`, verify the gate terminated cleanly and left no strays
-(`ps aux | grep -c xctest`, plus a sweep for stray `no-mistakes` children).
+After each `nm-smart-run`, verify the gate terminated cleanly and left no strays:
+
+```
+ps -Ao pid,ppid,etime,command | awk '$2==1 && /go-build.*\.test/'
+```
+
+Empty output is the pass. Kill anything it lists by explicit pid only, never with
+`pkill -f`: other agent sessions run on this box, and launchd agents also sit at
+PPID 1, so PPID alone does not identify a stray.
+
+## Follow-ups
+
+Neither branch below exists as code or as a branch anywhere. This section is the
+only record of them.
+
+- **Branch 2 — enforced per-step timeout (`step_timeout`), unlimited when unset.**
+  Build it so the timeout reaps through `internal/proctree`, not through
+  `cmd.Cancel` or a context deadline on the step's `exec.Cmd`. Those are provably
+  powerless against the failure that motivated branch 1: under `go test -race` on
+  darwin a `fork()` child can wedge in the ThreadSanitizer runtime *before*
+  `execve`, and `os/exec.Start` calls the blocking `os.StartProcess` before it
+  installs the `watchCtx` goroutine, so the parent is stuck inside `Start` and no
+  context watcher was ever installed. An outer bound only works if it is enforced
+  from a process that is not itself blocked on the wedged child, and if it kills by
+  pid list rather than by asking the wedged `exec.Cmd` to cancel itself. Branch 2 is
+  the right home for that outer hard bound; an in-process timeout on the step
+  command is not.
+- **Branch 3 — worktree-removal guard, plus routing `stepCmd` through
+  `ConfigureShellCommand`.** The guard needs the recorded-pid plumbing branch 1
+  added; see the note above about what branch 1 deliberately left unused.
