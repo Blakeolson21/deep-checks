@@ -219,8 +219,8 @@ func commandTimeout(args []string) time.Duration {
 //
 // Cancelling the context kills git's own PID, which is exactly the process that
 // wedges in the case above. A grandchild of git that outlives it is a different
-// leak class, owned by the transitive process-tree reap in
-// docs/superpowers/specs/2026-07-25-process-tree-reap-design.md; commandWaitDelay
+// leak class, owned by the process-tree reap in internal/shellenv
+// (ConfigureShellCommand plus TerminateShellCommandGroup); commandWaitDelay
 // keeps such a survivor from wedging Wait here in the meantime.
 func newCommand(ctx context.Context, args ...string) *boundedCommand {
 	var ceiling time.Duration
