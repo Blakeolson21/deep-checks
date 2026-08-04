@@ -163,8 +163,23 @@ the escaped pipe holder survives the reap. That keeps the test proving what it w
 written to prove - that WaitDelay alone bounds `Wait` - which matters because the reaper
 is best-effort and WaitDelay is the backstop when it fails.
 
-`internal/agent/reap_unix_test.go` is rewritten rather than extended, because its
-current "escaped" case asserts the opposite of the desired behavior.
+`internal/agent/reap_unix_test.go` is extended rather than rewritten. The plan had been
+to rewrite it, on the reading that its "escaped" case asserted the opposite of the
+desired behavior. On inspection that case is the agent-layer twin of
+`TestCombinedOutputShellCommand_WaitDelayBoundsEscapedPipeHolder` above: its leader
+exits inside the first sampling interval, so nothing was ever sampled and WaitDelay is
+genuinely the only thing under test. Rewriting it would have deleted backstop coverage
+by the same reasoning that keeps the shellenv one. It keeps its behavior and gains a
+comment saying why the escapee survives there.
+
+What the file was actually missing is a reap assertion of its own. Every existing reap
+test in it uses a grandchild that stays in the leader's group, so all of them still pass
+when `startNativeAgentCommand` is reverted from `shellenv.StartShellCommand` to a bare
+`cmd.Start()` - verified by ablation. That swap drops the leader from the tracker and
+makes every `setsid()` escapee unreachable, with no failing test and no symptom short of
+an orphan at PPID 1 burning a core. `TestNativeAgentCommand_TerminateReapsSetsidEscapeeAfterSampling`
+pins that wiring: it holds the leader alive past the first sample, then requires the
+escapee to be gone after `terminate()`.
 
 ## Documentation
 

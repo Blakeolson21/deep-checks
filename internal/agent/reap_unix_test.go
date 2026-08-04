@@ -20,6 +20,22 @@ import (
 
 const nativeAgentEscapedPipeHelperEnv = "NM_AGENT_NATIVE_PIPE_HELPER"
 
+const nativeAgentReapEscapeHelperEnv = "NM_AGENT_NATIVE_REAP_HELPER"
+
+// TestNativeAgentCommand_WaitDelayClosesEscapedPipeHolder proves the WaitDelay
+// backstop alone, so it deliberately does NOT assert that the setsid() escapee
+// is reaped: its leader exits in milliseconds, well inside the descendant
+// poller's first sampling interval, so nothing was ever sampled beneath it and
+// the reap has no pid list to work from. That is why the escapee is SIGKILLed by
+// hand in t.Cleanup here.
+//
+// This is not a blessing of the escape. It mirrors the deliberate split in
+// internal/shellenv, where TestCombinedOutputShellCommand_WaitDelayBoundsEscapedPipeHolder
+// keeps sampling off for the same reason: the reaper is best-effort, and
+// WaitDelay is the backstop for exactly the case where it fails to reach a
+// descendant. Reaping a setsid() escapee through the native agent path is
+// asserted separately by
+// TestNativeAgentCommand_TerminateReapsSetsidEscapeeAfterSampling.
 func TestNativeAgentCommand_WaitDelayClosesEscapedPipeHolder(t *testing.T) {
 	dir := t.TempDir()
 	readyFile := filepath.Join(dir, "ready")
@@ -75,6 +91,105 @@ func TestNativeAgentCommand_WaitDelayClosesEscapedPipeHolder(t *testing.T) {
 	}
 	if err := started.wait(); !errors.Is(err, exec.ErrWaitDelay) {
 		t.Fatalf("wait error = %v, want %v", err, exec.ErrWaitDelay)
+	}
+}
+
+// TestNativeAgentCommand_TerminateReapsSetsidEscapeeAfterSampling pins the wiring
+// that makes transitive reaping reachable from the agent path at all.
+//
+// Every other reap test in this file uses a grandchild that stays in the leader's
+// process group, so it is reaped by the single kill(-leaderPID) that Setpgid
+// already enables. Those tests keep passing if startNativeAgentCommand is ever
+// changed from shellenv.StartShellCommand back to a bare cmd.Start(). That swap
+// silently drops the leader from the descendant tracker, and a descendant that
+// calls setsid() - which is what Node's `detached: true` does, and therefore what
+// Claude Code's CLI Bash tool does to its shell - leaves the group and becomes
+// unreachable. The symptom is not a test failure but an orphan at PPID 1 burning
+// a core for hours, which is the incident this whole change exists to prevent.
+//
+// So this test escapes the group on purpose and requires the escapee to be gone
+// after terminate(). The leader is held alive past the tracker's first sampling
+// interval, because the reap path performs no listing of its own: it can only
+// kill what the poller observed while the leader still had its ppid links.
+func TestNativeAgentCommand_TerminateReapsSetsidEscapeeAfterSampling(t *testing.T) {
+	dir := t.TempDir()
+	readyFile := filepath.Join(dir, "ready")
+	pidFile := filepath.Join(dir, "escapee.pid")
+	exitFile := filepath.Join(dir, "exit")
+
+	cmd := exec.CommandContext(context.Background(), os.Args[0], "-test.run=^TestNativeAgentReapEscapeHelper$")
+	cmd.Env = append(os.Environ(),
+		nativeAgentReapEscapeHelperEnv+"=leader",
+		"NM_AGENT_REAP_READY="+readyFile,
+		"NM_AGENT_REAP_PID="+pidFile,
+		"NM_AGENT_REAP_EXIT="+exitFile,
+	)
+	shellenv.ConfigureShellCommand(cmd)
+
+	started, err := startNativeAgentCommand(cmd)
+	if err != nil {
+		t.Fatalf("startNativeAgentCommand: %v", err)
+	}
+	defer started.closePipes()
+
+	// Drain both pipes. waitForPipes blocks until each one reports EOF, which
+	// only happens if somebody reads them.
+	go func() { _, _ = io.ReadAll(started.stdout) }()
+	go func() { _, _ = io.ReadAll(started.stderr) }()
+
+	escapeePID := waitForPidFile(t, pidFile, 10*time.Second)
+	t.Cleanup(func() {
+		// Never leave a real orphan behind, whatever the assertions did.
+		_ = syscall.Kill(escapeePID, syscall.SIGKILL)
+	})
+	if !waitForNativeAgentPipeHelperReady(readyFile, 10*time.Second) {
+		t.Fatal("escapee never signalled that it had called setsid")
+	}
+
+	// Hold the leader alive past the poller's first sample. The interval lives in
+	// internal/shellenv and is not exported, so this waits on wall time with a
+	// margin rather than observing the sample directly.
+	time.Sleep(3 * time.Second)
+
+	if err := os.WriteFile(exitFile, []byte("go"), 0o644); err != nil {
+		t.Fatalf("signal leader to exit: %v", err)
+	}
+	if err := started.wait(); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+
+	// started.wait() returns only after the Wait goroutine has run terminate(),
+	// so the reap has already happened by here.
+	if !pidGoneWithin(escapeePID, 10*time.Second) {
+		t.Fatalf("setsid escapee pid %d survived terminate(); the native agent leader is not "+
+			"registered with the descendant tracker, so process-tree reaping cannot reach it "+
+			"(check that startNativeAgentCommand still uses shellenv.StartShellCommand)", escapeePID)
+	}
+}
+
+func TestNativeAgentReapEscapeHelper(t *testing.T) {
+	switch os.Getenv(nativeAgentReapEscapeHelperEnv) {
+	case "leader":
+		child := exec.Command(os.Args[0], "-test.run=^TestNativeAgentReapEscapeHelper$")
+		child.Env = append(os.Environ(), nativeAgentReapEscapeHelperEnv+"=escaped",
+			"NM_AGENT_REAP_READY="+os.Getenv("NM_AGENT_REAP_READY"))
+		// Detach the escapee's stdio. Holding the leader's pipes open would wedge
+		// the parser and test the WaitDelay backstop instead of the reap.
+		child.Stdout = nil
+		child.Stderr = nil
+		if err := child.Start(); err != nil {
+			os.Exit(2)
+		}
+		_ = os.WriteFile(os.Getenv("NM_AGENT_REAP_PID"), []byte(strconv.Itoa(child.Process.Pid)), 0o644)
+		if !waitForNativeAgentPipeHelperReady(os.Getenv("NM_AGENT_REAP_EXIT"), 60*time.Second) {
+			os.Exit(3)
+		}
+		os.Exit(0)
+	case "escaped":
+		_, _ = syscall.Setsid()
+		_ = os.WriteFile(os.Getenv("NM_AGENT_REAP_READY"), []byte("ready"), 0o644)
+		time.Sleep(120 * time.Second)
+		os.Exit(0)
 	}
 }
 

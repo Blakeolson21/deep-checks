@@ -69,7 +69,7 @@ Safest local verification sequence after non-trivial changes:
 - Every kill is guarded by a start-time match against a fresh snapshot, and pid 1, the current process, and its ancestors are never signalled. Pids get recycled; an unguarded stale pid list is a licence to kill strangers. Failing to reap is recoverable, killing the wrong process is not.
 - The daemon persists one record per live leader under `<NM_HOME>/proctrees` (`paths.ProcTreesDir`) and sweeps them in `recoverOnStartup` via `reapOrphanedProcessTrees`, which skips entirely when another daemon is alive. This is the step/agent-subprocess counterpart to `reapOrphanedServers`, which only covers managed servers that write their own PID file.
 - Residual gap, accepted: a process that both spawns and loses its parent inside one tick window is missed. Closing it needs ptrace or a PID namespace. Windows is unaffected - its kill-on-close job object is a stronger guarantee - so `proctree` is unix-only with non-unix stubs.
-- Regressions: `TestConfigureShellCommand_CancelReapsSetsidEscapedChild`, `TestTerminateShellCommandGroup_ReapsSetsidEscapeeAfterLeaderExits`, `TestTracker_*`, `TestKill_*`, `TestDescendants_*`, `TestReapOrphanedProcessTrees_*`.
+- Regressions: `TestConfigureShellCommand_CancelReapsSetsidEscapedChild`, `TestTerminateShellCommandGroup_ReapsSetsidEscapeeAfterLeaderExits`, `TestNativeAgentCommand_TerminateReapsSetsidEscapeeAfterSampling` (pins the agent path's tracker registration; every other agent reap test keeps its grandchild inside the leader's group, so all of them still pass if `StartShellCommand` is swapped back to a bare `cmd.Start()`), `TestTracker_*`, `TestKill_*`, `TestDescendants_*`, `TestReapOrphanedProcessTrees_*`.
 
 **Filesystem and Paths**
 
