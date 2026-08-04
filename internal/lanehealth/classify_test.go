@@ -81,6 +81,15 @@ func TestClassifyRecognizesClaudeBanners(t *testing.T) {
 			want: mustTime(t, "2026-08-04 21:15"),
 		},
 		{
+			// Captured verbatim from claude-acct at 2026-08-04 10:24 CDT, when
+			// this change's own gate run found every lane exhausted. Note the
+			// lowercase meridiem with no space and the trailing zone in
+			// parentheses, neither of which the synthesized cases cover.
+			name: "session limit exactly as the CLI printed it",
+			text: "You've hit your session limit · resets 10:50am (America/Chicago)",
+			want: mustTime(t, "2026-08-04 10:50"),
+		},
+		{
 			name: "weekly limit with dated reset",
 			text: "claude exited: exit status 1: You've hit your weekly limit · resets Aug 7, 11:06 PM",
 			want: mustTime(t, "2026-08-07 23:06"),
