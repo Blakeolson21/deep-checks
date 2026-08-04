@@ -53,7 +53,7 @@ A stale PID file can still confuse status reporting:
 ls -la ~/.no-mistakes/daemon.pid ~/.no-mistakes/socket
 ```
 
-If the PID file points at a process that's no longer running, remove it and run `no-mistakes daemon start` again.
+If the PID file points at a process that's no longer running, you don't need to delete anything by hand. `no-mistakes daemon stop` and `daemon restart` recognize the dead process, clear the stale PID file and socket, and succeed; `no-mistakes daemon start` replaces both when it launches the new daemon.
 
 ### "a no-mistakes daemon is already running for this NM_HOME"
 
