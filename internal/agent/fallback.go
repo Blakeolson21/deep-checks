@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -85,6 +86,10 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 		}
 	}
 	var lastErr error
+	// outages collects the lanes that failed because their provider quota is
+	// exhausted. When every candidate ends that way the run must say so, with
+	// each lane's reset time, rather than surfacing only the last lane's banner.
+	outages := make([]*LaneOutageError, 0, len(candidates))
 	for i, current := range candidates {
 		currentOpts := opts
 		if currentOpts.Session != nil && currentOpts.Session.ID == "" && !SupportsSessionResume(current) {
@@ -103,7 +108,17 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 			return result, nil
 		}
 		lastErr = err
-		if i == len(candidates)-1 || !isAgentUnavailableError(err) {
+		var outage *LaneOutageError
+		if errors.As(err, &outage) {
+			outages = append(outages, outage)
+		}
+		if i == len(candidates)-1 {
+			if len(outages) == len(candidates) {
+				return nil, allLanesExhausted(outages)
+			}
+			return nil, err
+		}
+		if !isAgentUnavailableError(err) {
 			return nil, err
 		}
 		next := candidates[i+1]
@@ -112,6 +127,31 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 		}
 	}
 	return nil, lastErr
+}
+
+// allLanesExhausted builds the terminal error for a step that had nowhere left
+// to run. It deliberately does not wrap any single lane's outage: the whole
+// point is that no one lane is the answer, and a caller matching
+// *LaneOutageError would otherwise treat this as one recoverable lane.
+func allLanesExhausted(outages []*LaneOutageError) error {
+	parts := make([]string, 0, len(outages))
+	for _, outage := range outages {
+		part := fmt.Sprintf("%s until %s", outage.Lane, outage.Until.Local().Format(resetTimeLayout))
+		if outage.Reason != "" {
+			part += " (" + truncateRunes(outage.Reason, 120) + ")"
+		}
+		parts = append(parts, part)
+	}
+	return fmt.Errorf("every configured agent lane is quota-exhausted, so this step has nowhere to run: %s",
+		strings.Join(parts, "; "))
+}
+
+func truncateRunes(text string, max int) string {
+	runes := []rune(text)
+	if len(runes) <= max {
+		return text
+	}
+	return string(runes[:max-3]) + "..."
 }
 
 func (a *fallbackAgent) Close() error {
@@ -130,6 +170,13 @@ func (a *fallbackAgent) Close() error {
 func isAgentUnavailableError(err error) bool {
 	if err == nil {
 		return false
+	}
+	// A lane skipped because its provider quota is exhausted never launched a
+	// process, so it carries none of the substrings below; it is nonetheless the
+	// clearest case of "this lane cannot serve the request, try the next one".
+	var outage *LaneOutageError
+	if errors.As(err, &outage) {
+		return true
 	}
 	msg := strings.ToLower(err.Error())
 	unavailable := []string{

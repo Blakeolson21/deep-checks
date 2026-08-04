@@ -57,6 +57,13 @@ func (p *Paths) TelemetryGateFile() string {
 	return filepath.Join(p.root, "telemetry-gate.json")
 }
 
+// LaneHealthFile persists which configured agent lanes are quota-exhausted and
+// when each recovers, so concurrent runs and later runs skip a dead lane
+// instead of each paying an agent spawn to rediscover it.
+func (p *Paths) LaneHealthFile() string {
+	return filepath.Join(p.root, "lane-health.json")
+}
+
 func (p *Paths) ReposDir() string { return filepath.Join(p.root, "repos") }
 func (p *Paths) RepoDir(repoID string) string {
 	return filepath.Join(p.root, "repos", repoID+".git")

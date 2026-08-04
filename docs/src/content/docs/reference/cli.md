@@ -419,6 +419,7 @@ Checks:
 Uses indicators: `✓` (available), `–` (not found, optional), `✗` (problem detected).
 
 The standalone runner rows inspect default binary names; the `cursor` row reports whichever of `cursor-agent` and `acpx` are missing.
+An installed runner whose provider quota is exhausted reports `quota-exhausted until <time>` instead of its binary path, which is the only place that otherwise-invisible cooldown surfaces; see [Global Config Reference](/no-mistakes/reference/global-config/) for how the cooldown is recorded and cleared.
 The [Global Config Reference](/no-mistakes/reference/global-config/) owns ACP gate-validation availability and probing semantics.
 Each validation run performs the authoritative agent resolution again after applying any trusted repository-level override.
 

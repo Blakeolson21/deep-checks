@@ -1,0 +1,126 @@
+package agent
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/lanehealth"
+)
+
+// resetTimeLayout renders a lane's recovery time in the operator's local zone,
+// with the zone named, because the whole point of the message is telling a
+// human when work can resume.
+const resetTimeLayout = "2006-01-02 15:04 MST"
+
+// LaneOutageError reports that one agent lane cannot run because the
+// provider's quota is exhausted until Until. It wraps the provider failure
+// that produced the mark when there is one, so the original banner still
+// reaches the step log.
+type LaneOutageError struct {
+	Lane   string
+	Until  time.Time
+	Reason string
+	cause  error
+}
+
+func (e *LaneOutageError) Error() string {
+	msg := fmt.Sprintf("agent lane %s is quota-exhausted until %s", e.Lane, e.Until.Local().Format(resetTimeLayout))
+	if e.Reason != "" {
+		msg += ": " + e.Reason
+	}
+	return msg
+}
+
+func (e *LaneOutageError) Unwrap() error { return e.cause }
+
+// LaneHealthStore is the slice of lanehealth.Store this package needs, kept as
+// an interface so tests and future callers can substitute their own.
+type LaneHealthStore interface {
+	Outage(lane string) (lanehealth.Outage, bool)
+	Mark(outage lanehealth.Outage) error
+	Clear(lane string) error
+}
+
+// laneHealthAgent skips an invocation entirely while its lane is known to be
+// quota-exhausted, and records the outage when a provider quota banner is what
+// failed the invocation.
+//
+// Marking happens here rather than in the fallback wrapper so a single
+// configured agent - the default - also fails fast with a reset time instead
+// of spawning a process to be told it is out of quota.
+type laneHealthAgent struct {
+	Agent
+	store LaneHealthStore
+	now   func() time.Time
+}
+
+// WithLaneHealth wraps a single agent lane with persisted quota-outage
+// tracking. A nil store returns the agent unchanged, so demo mode and tests
+// that do not care keep the previous behavior exactly.
+func WithLaneHealth(a Agent, store LaneHealthStore, now func() time.Time) Agent {
+	if a == nil {
+		return nil
+	}
+	if store == nil {
+		return a
+	}
+	if now == nil {
+		now = time.Now
+	}
+	return laneHealthAgent{Agent: a, store: store, now: now}
+}
+
+func (l laneHealthAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
+	lane := l.Agent.Name()
+	if outage, down := l.store.Outage(lane); down {
+		err := &LaneOutageError{Lane: lane, Until: outage.Until, Reason: outage.Reason}
+		if opts.OnChunk != nil {
+			opts.OnChunk("\n" + err.Error() + "\n")
+		}
+		return nil, err
+	}
+
+	result, err := l.Agent.Run(ctx, opts)
+	if err == nil {
+		// A completed invocation is direct evidence the lane works, so any
+		// surviving mark - including one written from a misread banner - is
+		// dropped rather than left to expire on its own.
+		_ = l.store.Clear(lane)
+		return result, nil
+	}
+	if ctx.Err() != nil {
+		// A cancelled or timed-out run says nothing about the lane's quota, and
+		// its partial output may still carry a banner the provider had only
+		// warned about. Never park a lane on that evidence.
+		return result, err
+	}
+	// Only a failed invocation is classified, and its text comes from the
+	// provider's stderr and error channel, never from agent-authored output.
+	if outage, quota := lanehealth.Classify(lane, err.Error(), l.now()); quota {
+		_ = l.store.Mark(outage)
+		return nil, &LaneOutageError{
+			Lane:   lane,
+			Until:  outage.Until,
+			Reason: outage.Reason,
+			cause:  err,
+		}
+	}
+	return result, err
+}
+
+func (l laneHealthAgent) SupportsSessionResume() bool {
+	return SupportsSessionResume(l.Agent)
+}
+
+func (l laneHealthAgent) SupportsSessionProvider(provider string) bool {
+	return SupportsSessionProvider(l.Agent, provider)
+}
+
+func (l laneHealthAgent) ReportsAgentAttempts() bool {
+	return ReportsAgentAttempts(l.Agent)
+}
+
+func (l laneHealthAgent) NeutralizesGateInstructions() bool {
+	return NeutralizesGateInstructions(l.Agent)
+}

@@ -10,6 +10,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/lanehealth"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
@@ -108,6 +109,16 @@ func newDoctorCmd() *cobra.Command {
 					}
 				}
 
+				// A lane suppressed by a quota cooldown is installed and healthy-looking
+				// but will not be used until it resets, so doctor is where that
+				// otherwise-invisible state has to surface.
+				laneOutages := map[string]lanehealth.Outage{}
+				if p != nil {
+					for _, outage := range lanehealth.NewStore(p.LaneHealthFile(), nil).Snapshot() {
+						laneOutages[outage.Lane] = outage
+					}
+				}
+
 				agents := doctorAgentChecks()
 				fmt.Fprintln(w)
 				fmt.Fprintf(w, "  %s\n", sCyan.Render("Agents"))
@@ -121,7 +132,12 @@ func newDoctorCmd() *cobra.Command {
 							found = append(found, path)
 						}
 					}
+					outage, exhausted := laneOutages[a.name]
 					switch {
+					case len(missing) == 0 && exhausted:
+						warn(label, fmt.Sprintf("quota-exhausted until %s %s",
+							outage.Until.Local().Format("2006-01-02 15:04 MST"),
+							sDim.Render("(skipped by the pipeline until then)")))
 					case len(missing) == 0:
 						ok(label, strings.Join(found, ", "))
 					case len(a.binaries) > 1:

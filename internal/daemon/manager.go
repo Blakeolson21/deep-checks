@@ -18,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/gate"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/lanehealth"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
@@ -156,7 +157,7 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if err != nil {
 		return nil, err
 	}
-	ag, err := newPipelineAgent(ctx, cfg, exec.LookPath)
+	ag, err := newPipelineAgent(ctx, cfg, exec.LookPath, m.laneHealth())
 	if err != nil {
 		return nil, err
 	}
@@ -227,13 +228,22 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	return config.Merge(globalCfg, config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)), nil
 }
 
-func newPipelineAgent(ctx context.Context, cfg *config.Config, lookPath func(string) (string, error)) (agent.Agent, error) {
-	if steps.IsDemoMode() {
-		return agent.NewNoop(), nil
+// laneHealth returns the agent lane-health store for this daemon root. The
+// store is file-backed, so every run - concurrent or later, same process or
+// not - reads the same marks. A manager without paths (unit tests building a
+// bare manager) gets nil, which disables the cooldown rather than failing.
+func (m *RunManager) laneHealth() *lanehealth.Store {
+	if m == nil || m.paths == nil {
+		return nil
 	}
-	if err := cfg.ResolveAgent(ctx, lookPath); err != nil {
-		return nil, err
-	}
+	return lanehealth.NewStore(m.paths.LaneHealthFile(), nil)
+}
+
+// newLaneAgents builds one decorated agent per configured lane, in fallback
+// order. cfg must already be resolved. Both pipeline-agent construction sites
+// share this so a lane decorator can never be wired into one path and missed
+// in the other.
+func newLaneAgents(cfg *config.Config, health *lanehealth.Store) ([]agent.Agent, error) {
 	agents := cfg.Agents
 	if len(agents) == 0 {
 		agents = []types.AgentName{cfg.Agent}
@@ -250,7 +260,36 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, lookPath func(str
 			}
 			return nil, fmt.Errorf("create agent %s: %w", name, err)
 		}
-		created = append(created, agent.WithSteering(next))
+		// Steer every pipeline agent to keep writes inside the worktree and avoid
+		// mutating system state (e.g. brew/Homebrew touching /Applications), which
+		// triggers macOS App Management prompts. Lane health wraps the steered
+		// agent so an exhausted lane is skipped before anything is launched.
+		created = append(created, agent.WithLaneHealth(agent.WithSteering(next), laneHealthStore(health), nil))
+	}
+	return created, nil
+}
+
+// laneHealthStore converts a possibly-nil *lanehealth.Store into an interface
+// value that is nil when the store is. Without it a typed-nil would satisfy
+// the interface, so WithLaneHealth would wrap the lane in a decorator that can
+// only ever answer "healthy" instead of returning the agent unchanged.
+func laneHealthStore(health *lanehealth.Store) agent.LaneHealthStore {
+	if health == nil {
+		return nil
+	}
+	return health
+}
+
+func newPipelineAgent(ctx context.Context, cfg *config.Config, lookPath func(string) (string, error), health *lanehealth.Store) (agent.Agent, error) {
+	if steps.IsDemoMode() {
+		return agent.NewNoop(), nil
+	}
+	if err := cfg.ResolveAgent(ctx, lookPath); err != nil {
+		return nil, err
+	}
+	created, err := newLaneAgents(cfg, health)
+	if err != nil {
+		return nil, err
 	}
 	ag := agent.NewFallback(created)
 	// Fail closed ONLY under the trusted opt-out (see startRun): refuse an
@@ -854,25 +893,11 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 			trackStartFailure("resolve_agent")
 			return "", err
 		}
-		agents := cfg.Agents
-		if len(agents) == 0 {
-			agents = []types.AgentName{cfg.Agent}
-		}
-		created := make([]agent.Agent, 0, len(agents))
-		for _, name := range agents {
-			next, agErr := agent.NewWithOptions(name, cfg.AgentPathFor(name), cfg.AgentArgsFor(name), agent.Options{
-				ACPRegistryOverrides:   cfg.ACPRegistryOverrides,
-				DisableProjectSettings: cfg.DisableProjectSettings,
-			})
-			if agErr != nil {
-				m.db.UpdateRunError(run.ID, fmt.Sprintf("create agent %s: %s", name, agErr))
-				trackStartFailure("create_agent")
-				return "", fmt.Errorf("create agent %s: %w", name, agErr)
-			}
-			// Steer every pipeline agent to keep writes inside the worktree and
-			// avoid mutating system state (e.g. brew/Homebrew touching
-			// /Applications), which triggers macOS App Management prompts.
-			created = append(created, agent.WithSteering(next))
+		created, agErr := newLaneAgents(cfg, m.laneHealth())
+		if agErr != nil {
+			m.db.UpdateRunError(run.ID, agErr.Error())
+			trackStartFailure("create_agent")
+			return "", agErr
 		}
 		ag = agent.NewFallback(created)
 		// Fail closed ONLY under the trusted opt-out: when the repo asked to

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/filelock"
 )
 
 // maxReadSurfaceEntries bounds the persisted gate state so an unbounded set of
@@ -51,11 +53,11 @@ func (g *ReadSurfaceGate) ShouldEmit(surface, fingerprint string) bool {
 	if g == nil || g.path == "" {
 		return true
 	}
-	lock, err := acquireReadSurfaceLock(g.path + ".lock")
+	lock, err := filelock.Acquire(g.path + ".lock")
 	if err != nil {
 		return true
 	}
-	defer lock.Close()
+	defer lock.Release()
 
 	now := g.now()
 	state := g.load()
