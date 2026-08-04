@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -935,6 +936,11 @@ func TestWaitForDaemonStopNeverKillsOwnPIDWhenHealthCheckOnlyErrors(t *testing.T
 	}
 }
 
+// TestWaitForDaemonStopDoesNotTreatHealthCheckErrorsAsStopped pins that a
+// health check that only errors never confirms a stop while the recorded
+// daemon process is still alive: the artifacts must survive so the daemon is
+// not orphaned. A recorded pid that is provably dead is the opposite case and
+// is cleaned up - see TestWaitForDaemonStopCleansStaleArtifactsOfDeadDaemon.
 func TestWaitForDaemonStopDoesNotTreatHealthCheckErrorsAsStopped(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "dtest")
 	if err != nil {
@@ -959,6 +965,16 @@ func TestWaitForDaemonStopDoesNotTreatHealthCheckErrorsAsStopped(t *testing.T) {
 	}
 	defer func() {
 		daemonHealthCheck = originalHealthCheck
+	}()
+	originalProcessRunning := daemonProcessRunning
+	daemonProcessRunning = func(int) (bool, error) { return true, nil }
+	defer func() {
+		daemonProcessRunning = originalProcessRunning
+	}()
+	originalProcessStartTime := daemonProcessStartTime
+	daemonProcessStartTime = func(int) (time.Time, error) { return time.Now(), nil }
+	defer func() {
+		daemonProcessStartTime = originalProcessStartTime
 	}()
 
 	started := time.Now()
@@ -1036,6 +1052,66 @@ func TestWaitForDaemonStopRejectsStalePIDBeforeKill(t *testing.T) {
 	}
 	if _, err := os.Stat(p.Socket()); err != nil {
 		t.Fatalf("expected socket file to remain after rejected kill, got err=%v", err)
+	}
+}
+
+// TestWaitForDaemonStopCleansStaleArtifactsOfDeadDaemon reproduces the macOS
+// `daemon restart` failure after an unclean daemon death: the socket file is
+// still on disk with nothing listening, and daemon.pid records a pid that no
+// longer exists. `ps -p <dead pid>` exits 1 on macOS and Linux, and the PID
+// fallback treated that inspection failure as an error ("inspect daemon pid
+// <pid>: exit status 1") instead of recognizing the process is gone. A stop
+// whose recorded daemon is provably dead, with nothing accepting connections
+// on the socket, must clean the stale artifacts and report success so that
+// `daemon restart` can start fresh.
+func TestWaitForDaemonStopCleansStaleArtifactsOfDeadDaemon(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("repro needs a unix domain socket file")
+	}
+	tmpDir, err := os.MkdirTemp("", "dtest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	p := paths.WithRoot(tmpDir)
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NM_TEST_DAEMON_STOP_TIMEOUT", "300ms")
+
+	// A real dead pid, exercised through the real ps-backed inspection
+	// helpers: spawn a child and reap it.
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	deadPID := cmd.Process.Pid
+	writeDaemonPIDRecord(t, p.PIDFile(), daemonPIDFile{PID: deadPID, StartedAt: time.Now().Add(-time.Hour).UTC()})
+
+	// A real socket file with nothing listening: bind, then close the fd
+	// without unlinking - exactly what an uncleanly killed daemon leaves.
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Bind(fd, &syscall.SockaddrUnix{Name: p.Socket()}); err != nil {
+		syscall.Close(fd)
+		t.Fatal(err)
+	}
+	if err := syscall.Close(fd); err != nil {
+		t.Fatal(err)
+	}
+
+	instance := captureRunningDaemon(p)
+	if err := waitForDaemonStop(p, instance); err != nil {
+		t.Fatalf("waitForDaemonStop should treat a provably dead daemon as stopped, got: %v", err)
+	}
+	if _, err := os.Stat(p.Socket()); !os.IsNotExist(err) {
+		t.Fatalf("expected stale socket to be removed, got err=%v", err)
+	}
+	if _, err := os.Stat(p.PIDFile()); !os.IsNotExist(err) {
+		t.Fatalf("expected stale pid file to be removed, got err=%v", err)
 	}
 }
 

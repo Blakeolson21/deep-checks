@@ -825,6 +825,11 @@ func waitForDaemonStop(p *paths.Paths, instance daemonInstance) error {
 	pid, err := ReadPID(p)
 	switch {
 	case err == nil:
+		if alive, _ := daemonHealthCheck(p); !alive && recordedDaemonProvablyGone(p, pid) {
+			cleanupDaemonArtifacts(p)
+			slog.Info("daemon already dead; cleaned stale artifacts", "pid", pid)
+			return nil
+		}
 		if err := validateDaemonPIDFallback(p, pid); err != nil {
 			return err
 		}
@@ -859,6 +864,38 @@ func waitForDaemonStop(p *paths.Paths, instance daemonInstance) error {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return fmt.Errorf("daemon pid %d still running after kill", pid)
+}
+
+// recordedDaemonProvablyGone reports whether the pid-file daemon is dead with
+// nothing serving its socket, so a stop has nothing left to do but clear the
+// stale artifacts. It exists because the PID-kill fallback validates identity
+// via `ps -p <pid>`, which exits 1 for a nonexistent pid on macOS and Linux:
+// inspecting a dead daemon's start time fails, and treating that failure as an
+// inspection error made `daemon restart` refuse to stop a daemon that had
+// already died uncleanly (stale socket file plus dead recorded pid). Liveness
+// is therefore checked with the signal-0 probe first, which distinguishes
+// "gone" from "cannot inspect". The socket must also be provably dead: a
+// listener still accepting connections means some daemon is serving this
+// root, and removing its socket would orphan it.
+func recordedDaemonProvablyGone(p *paths.Paths, pid int) bool {
+	if pid <= 0 || pid == os.Getpid() {
+		return false
+	}
+	running, err := daemonProcessRunning(pid)
+	if err != nil || running {
+		return false
+	}
+	info, err := os.Stat(p.Socket())
+	if err != nil {
+		return os.IsNotExist(err)
+	}
+	if info.Mode()&os.ModeSocket != 0 {
+		accepting, err := daemonSocketAcceptingConnections(p.Socket())
+		if err != nil || accepting {
+			return false
+		}
+	}
+	return true
 }
 
 func cleanupDaemonArtifacts(p *paths.Paths) {
