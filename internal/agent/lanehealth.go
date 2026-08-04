@@ -110,11 +110,23 @@ func WithLaneHealth(a Agent, store LaneHealthStore, now func() time.Time) Agent 
 func (l laneHealthAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	lane := l.Agent.Name()
 	startedAt := l.now()
+	// A lane that reports its own attempts emits them from below this wrapper,
+	// carrying the raw provider error, before the outage verdict exists. This
+	// wrapper therefore owns attempt fidelity for such a lane. A lane that does
+	// not report attempts is reported by the caller from this wrapper's return
+	// value, which already carries the verdict.
+	reportsAttempts := ReportsAgentAttempts(l.Agent)
 	if outage, down := l.store.Outage(lane); down {
 		if !l.store.ClaimProbe(lane) {
 			err := &LaneOutageError{Lane: lane, Until: outage.Until, Reason: outage.Reason}
 			if opts.OnChunk != nil {
 				opts.OnChunk("\n" + err.Error() + "\n")
+			}
+			if reportsAttempts {
+				// A skipped lane never reaches the adapter that would report it, so
+				// without this the skip leaves no record at all whenever a fallback
+				// set moves on to another lane.
+				emitAgentAttempt(opts, lane, nil, err, startedAt, l.now())
 			}
 			return nil, err
 		}
@@ -123,6 +135,13 @@ func (l laneHealthAgent) Run(ctx context.Context, opts RunOpts) (*Result, error)
 				lane, outage.Until.Local().Format(resetTimeLayout)))
 		}
 	}
+
+	var relay *attemptRelay
+	if opts.OnAttempt != nil && reportsAttempts {
+		relay = &attemptRelay{downstream: opts.OnAttempt}
+		opts.OnAttempt = relay.capture
+	}
+	defer relay.release()
 
 	result, err := l.Agent.Run(ctx, opts)
 	if err == nil {
@@ -152,14 +171,54 @@ func (l laneHealthAgent) Run(ctx context.Context, opts RunOpts) (*Result, error)
 	// provider's stderr and error channel, never from agent-authored output.
 	if outage, quota := lanehealth.Classify(lane, err.Error(), l.now()); quota {
 		_ = l.store.Mark(outage)
-		return nil, &LaneOutageError{
+		outageErr := &LaneOutageError{
 			Lane:   lane,
 			Until:  outage.Until,
 			Reason: outage.Reason,
 			cause:  err,
 		}
+		relay.amend(outageErr)
+		return nil, outageErr
 	}
 	return result, err
+}
+
+// attemptRelay defers a lane's most recent adapter attempt so the lane wrapper
+// can re-report its error as the quota outage it classified only after the
+// adapter has already returned. Earlier retry attempts pass through untouched,
+// and their order is preserved because attempt N is released the moment
+// attempt N+1 arrives. Every method tolerates a nil relay so a lane with no
+// attempt reporting needs no branch at the call sites.
+type attemptRelay struct {
+	downstream func(Attempt)
+	held       *Attempt
+}
+
+func (r *attemptRelay) capture(attempt Attempt) {
+	if r == nil {
+		return
+	}
+	r.release()
+	held := attempt
+	r.held = &held
+}
+
+// amend replaces the held attempt's error with the verdict the wrapper reached,
+// so the recorded attempt and the caller's error agree on why the lane failed.
+func (r *attemptRelay) amend(err error) {
+	if r == nil || r.held == nil {
+		return
+	}
+	r.held.Err = err
+}
+
+func (r *attemptRelay) release() {
+	if r == nil || r.held == nil {
+		return
+	}
+	attempt := *r.held
+	r.held = nil
+	r.downstream(attempt)
 }
 
 func (l laneHealthAgent) SupportsSessionResume() bool {
