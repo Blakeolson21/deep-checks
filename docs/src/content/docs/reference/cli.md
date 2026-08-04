@@ -419,7 +419,7 @@ Checks:
 Uses indicators: `✓` (available), `–` (not found, optional), `✗` (problem detected).
 
 The standalone runner rows inspect default binary names; the `cursor` row reports whichever of `cursor-agent` and `acpx` are missing.
-An installed runner whose provider quota is exhausted reports `quota-exhausted until <time>` instead of its binary path, which is the only place that otherwise-invisible cooldown surfaces; see [Global Config Reference](/no-mistakes/reference/global-config/) for how the cooldown is recorded and cleared.
+`doctor` is the only place a provider quota cooldown surfaces, so it reports one three ways: an installed runner whose quota is exhausted reports `quota-exhausted until <time>` instead of its binary path; a recorded lane with no runner row above it, such as an explicit `acp:<target>` fallback, gets its own row under the same name; and `gate validation` reports the resolved agent as runnable but quota-exhausted rather than plainly runnable. See [Global Config Reference](/no-mistakes/reference/global-config/#agent) for how the cooldown is recorded and cleared.
 The [Global Config Reference](/no-mistakes/reference/global-config/) owns ACP gate-validation availability and probing semantics.
 Each validation run performs the authoritative agent resolution again after applying any trusted repository-level override.
 

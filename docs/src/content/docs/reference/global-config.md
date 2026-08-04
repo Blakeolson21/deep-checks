@@ -107,7 +107,7 @@ The record is stored in `lane-health.json` under the daemon root, so concurrent 
 A successful invocation clears a record that was written no later than the moment that invocation started, so a record another run wrote while it was still running stays in force.
 One invocation an hour is still let through a recorded entry to check whether it recovered early, so a reset the provider stated days out cannot keep an entry unused for longer than an hour after its quota is actually restored.
 If every configured entry is exhausted, the step fails with a message naming each entry and when it recovers.
-`no-mistakes doctor` reports a recorded entry as `quota-exhausted until <time>` in place of its binary path, says the same of the resolved gate agent when that is the recorded entry, and lists any other recorded entry, such as an explicit `acp:<target>` fallback, on its own row.
+A recorded entry is otherwise invisible, so [`no-mistakes doctor`](/no-mistakes/reference/cli/#no-mistakes-doctor) is where it surfaces.
 The record describes the account that was signed in when the banner appeared, so if you switch that provider to a different account before the stated reset, delete `lane-health.json` to make the entry available again immediately rather than waiting for the next hourly check.
 
 ### acpx_path
