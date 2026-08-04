@@ -74,15 +74,26 @@ var (
 )
 
 // commandWaitDelay bounds cmd.Wait after the process has exited or Cancel has
-// returned, so a surviving pipe holder - a credential helper or a hook that
-// inherited stdout - cannot wedge Wait indefinitely. It matches the shellenv
-// helper's backstop. It costs nothing in the ordinary case, where git's exit
-// closes the last pipe descriptor and Wait returns immediately. When a
-// descendant does outlive git holding that pipe, Wait returns
-// exec.ErrWaitDelay after the delay and the caller reports the command as
-// failed even though git itself succeeded; that misreport is the accepted
-// price of never wedging, and it is the exact case the delay exists for.
-const commandWaitDelay = 5 * time.Second
+// returned, so a surviving pipe holder - a credential helper, a hook that
+// inherited stdout, or a fork child wedged before execve - cannot wedge Wait
+// indefinitely. It costs nothing in the ordinary case, where git's exit closes
+// the last pipe descriptor and Wait returns immediately.
+//
+// When the delay does expire, exec reports exec.ErrWaitDelay and DISCARDS the
+// captured output even though git exited 0, so the caller reports a command
+// that actually succeeded as failed. Callers in this package fail closed on
+// error (`HasUncommittedChanges` failing reads as "not clean", which blocks a
+// custody recovery), so that misreport is a correctness bug rather than a
+// tolerable cost, and the delay must not be the thing that triggers it.
+//
+// Hence 60s rather than the 5s the shellenv helper uses for long-lived agent
+// commands. The delay has to clear any plausible scheduler starvation of the
+// reader goroutine on a badly loaded host, which is the exact condition this
+// whole fix concerns: the incident host sat at load 160. A legitimate pipe
+// close after a short git command takes microseconds, so the headroom is free,
+// and the pathological case it guards still ends in a bounded error instead of
+// a permanent wedge. Kept a var so tests can shorten it.
+var commandWaitDelay = 60 * time.Second
 
 // networkSubcommands reach a remote and get the longer ceiling. "remote" and
 // "submodule" are included because some of their forms are network operations;

@@ -115,6 +115,12 @@ func TestRun_ReturnsWhenCancelledChildLeavesAPipeHolder(t *testing.T) {
 	writeFakeGit(t, binDir, "/bin/sleep 600 &\necho $! > "+gpidFile+"\nwait\n")
 	t.Cleanup(func() { reapPIDFile(gpidFile) })
 
+	// Shorten the production delay so this stays a fast test; the delay's real
+	// value is guarded by TestCommandWaitDelay_StaysGenerousEnoughForALoadedHost.
+	restoreDelay := commandWaitDelay
+	commandWaitDelay = 2 * time.Second
+	t.Cleanup(func() { commandWaitDelay = restoreDelay })
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -187,6 +193,22 @@ func TestEveryPackageHelperBoundsItsGitChild(t *testing.T) {
 				t.Fatalf("%s left git pid %d alive: an unbounded child reparents to init and spins there indefinitely", tc.name, gitPID)
 			}
 		})
+	}
+}
+
+// TestCommandWaitDelay_StaysGenerousEnoughForALoadedHost guards a value that
+// reads like a tidy-up candidate but is load-bearing. When the delay expires,
+// exec reports ErrWaitDelay and discards the output of a git command that
+// exited 0, and callers in this package fail closed on error, so a tight delay
+// converts host load into a false "not clean" verdict that blocks custody
+// recovery. Verified directly: a command exiting 0 with a pipe-holding
+// descendant returns ErrWaitDelay and empty output. The delay therefore has to
+// clear scheduler starvation on a loaded host (the incident host sat at load
+// 160), not merely a fast local run.
+func TestCommandWaitDelay_StaysGenerousEnoughForALoadedHost(t *testing.T) {
+	const floor = 30 * time.Second
+	if commandWaitDelay < floor {
+		t.Fatalf("commandWaitDelay = %s, below the %s floor: a delay this tight makes a loaded host report succeeding git commands as failures, and callers here fail closed on that error", commandWaitDelay, floor)
 	}
 }
 
