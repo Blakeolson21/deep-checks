@@ -82,6 +82,28 @@ func TestCommandTimeout_GivesTreeMaterializingSubcommandsTheLongerCeiling(t *tes
 	}
 }
 
+// TestCommandTimeout_GivesHookRunningSubcommandsTheLongerCeiling covers the
+// commands whose runtime belongs to a repository's hooks rather than to git.
+// The pipeline commits without --no-verify, so a pre-commit hook that runs a
+// typecheck or a test suite runs inside `git commit`; the plumbing ceiling
+// would kill that healthy build and fail the run.
+func TestCommandTimeout_GivesHookRunningSubcommandsTheLongerCeiling(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"commit", []string{"commit", "-m", "no-mistakes: apply agent fixes"}},
+		{"commit behind -C", []string{"-C", "/tmp/repo", "commit", "-m", "msg"}},
+		{"commit behind --git-dir", []string{"--git-dir=/tmp/x.git", "commit", "-m", "msg"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := commandTimeout(tc.args); got != extendedCommandTimeout {
+				t.Errorf("commandTimeout(%q) = %s, want the extended ceiling %s: this command runs repository-supplied hooks, so its cost is not git's", tc.args, got, extendedCommandTimeout)
+			}
+		})
+	}
+}
+
 // TestRun_CeilingExpiryNamesTheBoundThisPackageSupplied pins the diagnosis this
 // bounding exists to produce. A ceiling expiry reaches the caller by two
 // different routes: before the fork it is context.DeadlineExceeded returned

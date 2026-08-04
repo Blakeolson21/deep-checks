@@ -151,6 +151,28 @@ var treeSubcommands = map[string]struct{}{
 	"worktree":  {},
 }
 
+// hookSubcommands run repository-supplied hooks, so what governs their runtime
+// is whatever the hook does rather than anything git does. The pipeline's
+// commits pass no --no-verify and NonInteractiveEnv does not disable hooks, so
+// a repository's own pre-commit hook - lint-staged, a typecheck, a test run -
+// executes on every pipeline commit whenever core.hookspath resolves to the
+// worktree's hooks instead of the gate's, which is the exact case
+// IsolateHooksPath in hook.go exists to defend the gate against. A ceiling
+// short enough to interrupt that would be pacing someone else's build.
+var hookSubcommands = map[string]struct{}{
+	"am":     {},
+	"commit": {},
+}
+
+// extendedCeilingSubcommands collects the sets above under the one rule they
+// share: the runtime is not git's own, so the plumbing ceiling would be pacing
+// real work instead of bounding a wedge.
+var extendedCeilingSubcommands = []map[string]struct{}{
+	networkSubcommands,
+	treeSubcommands,
+	hookSubcommands,
+}
+
 // globalOptionsWithSeparateValue are the git global options whose value is its
 // own argument, so that value must not be mistaken for the subcommand. The
 // attached forms (--git-dir=<path>) need no entry, because they are a single
@@ -180,11 +202,10 @@ func gitSubcommand(args []string) string {
 
 func commandTimeout(args []string) time.Duration {
 	sub := gitSubcommand(args)
-	if _, ok := networkSubcommands[sub]; ok {
-		return extendedCommandTimeout
-	}
-	if _, ok := treeSubcommands[sub]; ok {
-		return extendedCommandTimeout
+	for _, set := range extendedCeilingSubcommands {
+		if _, ok := set[sub]; ok {
+			return extendedCommandTimeout
+		}
 	}
 	return defaultCommandTimeout
 }
