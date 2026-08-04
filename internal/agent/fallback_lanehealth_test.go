@@ -88,6 +88,26 @@ func TestFallbackFailsWithEveryLaneResetTimeWhenAllLanesAreExhausted(t *testing.
 	if errors.As(err, &outageErr) {
 		t.Fatalf("the aggregate must not masquerade as a single-lane outage: %v", err)
 	}
+	// Telemetry still needs to know the step died on quota, so the aggregate
+	// classifies as a quota outage without being a single recoverable lane.
+	if !IsQuotaOutage(err) {
+		t.Fatalf("the aggregate must classify as a quota outage: %v", err)
+	}
+}
+
+// TestIsQuotaOutage pins the classifier's boundary: both lane-outage shapes
+// are quota, an ordinary provider exit whose text resembles a banner is not.
+func TestIsQuotaOutage(t *testing.T) {
+	until := time.Date(2026, 8, 7, 23, 6, 0, 0, time.Local)
+	if !IsQuotaOutage(&LaneOutageError{Lane: "codex", Until: until}) {
+		t.Fatal("a skipped marked lane must classify as a quota outage")
+	}
+	if !IsQuotaOutage(&LaneOutageError{Lane: "codex", Until: until, cause: errors.New("codex exited: exit status 1")}) {
+		t.Fatal("a freshly classified banner must classify as a quota outage")
+	}
+	if IsQuotaOutage(errors.New("codex exited: exit status 1: network unreachable")) {
+		t.Fatal("an ordinary exit must not classify as a quota outage")
+	}
 }
 
 // A session-scoped invocation is narrowed to the one lane that owns the

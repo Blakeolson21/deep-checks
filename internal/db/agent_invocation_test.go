@@ -183,6 +183,7 @@ func TestAgentInvocationAggregatesAndRunSummary(t *testing.T) {
 		{RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "codex", SessionMode: InvocationModeStarted, StartedAt: 1, CompletedAt: 2, DurationMS: 100, ExitStatus: "ok", InputTokens: 10, OutputTokens: 5},
 		{RunID: run.ID, StepName: "review", Round: 2, Purpose: "review", Agent: "codex", SessionMode: InvocationModeResumed, StartedAt: 3, CompletedAt: 4, DurationMS: 50, ExitStatus: "ok", InputTokens: 10, OutputTokens: 5},
 		{RunID: run.ID, StepName: "review", Round: 2, Purpose: "review-fix", Agent: "codex", SessionMode: InvocationModeFallback, StartedAt: 5, CompletedAt: 6, DurationMS: 70, ExitStatus: "error", FailureCategory: "exit"},
+		{RunID: run.ID, StepName: "review", Round: 3, Purpose: "review-fix", Agent: "codex", SessionMode: InvocationModeCold, StartedAt: 7, CompletedAt: 8, DurationMS: 10, ExitStatus: "error", FailureCategory: "quota"},
 	}
 	for _, inv := range seed {
 		if _, err := d.InsertAgentInvocation(inv); err != nil {
@@ -204,7 +205,7 @@ func TestAgentInvocationAggregatesAndRunSummary(t *testing.T) {
 		t.Fatalf("review aggregate = %+v", review)
 	}
 	fix := byPurpose["review-fix"]
-	if fix.Count != 1 || fix.Fallback != 1 || fix.Errors != 1 {
+	if fix.Count != 2 || fix.Fallback != 1 || fix.Errors != 2 || fix.Quota != 1 {
 		t.Fatalf("review-fix aggregate = %+v", fix)
 	}
 
@@ -212,7 +213,7 @@ func TestAgentInvocationAggregatesAndRunSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run summary: %v", err)
 	}
-	if summary.Count != 3 || summary.Resumed != 1 || summary.Fallback != 1 || summary.TotalDurationMS != 220 {
+	if summary.Count != 4 || summary.Resumed != 1 || summary.Fallback != 1 || summary.TotalDurationMS != 230 {
 		t.Fatalf("run summary = %+v", summary)
 	}
 }

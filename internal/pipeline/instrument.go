@@ -240,6 +240,12 @@ func invocationSessionKey(opts agent.RunOpts, result *agent.Result) string {
 // low-cardinality category. Only the category is stored - never the error
 // text, which can embed agent output.
 func classifyInvocationFailure(err error) string {
+	// Quota is matched structurally, not by substring: a lane outage's text
+	// embeds the provider banner excerpt (often "codex exited: ..."), which
+	// would otherwise misfile it under "exit" or "other".
+	if agent.IsQuotaOutage(err) {
+		return "quota"
+	}
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "parse events") || strings.Contains(msg, "output parse"):
@@ -259,6 +265,12 @@ func classifyInvocationFailure(err error) string {
 func classifyFallbackReason(err error) string {
 	if err == nil {
 		return db.FallbackReasonOther
+	}
+	// Structural quota match first, for the same reason as in
+	// classifyInvocationFailure: the outage text embeds banner excerpts the
+	// substring checks below would misfile.
+	if agent.IsQuotaOutage(err) {
+		return db.FallbackReasonQuota
 	}
 	msg := err.Error()
 	switch {

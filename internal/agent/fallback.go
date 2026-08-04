@@ -110,6 +110,9 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 		lastErr = err
 		var outage *LaneOutageError
 		if errors.As(err, &outage) {
+			// TODO(2026-08-04 incident follow-up): a quota-dead lane fails over
+			// only to the next provider lane; same-provider account failover does
+			// not exist, so a step can die here while sibling accounts sit idle.
 			outages = append(outages, outage)
 		}
 		if i == len(candidates)-1 {
@@ -151,9 +154,16 @@ func allLanesExhausted(outages []*LaneOutageError, everyLane bool) error {
 	if !everyLane {
 		subject = "every agent lane eligible for this invocation is"
 	}
-	return fmt.Errorf("%s quota-exhausted, so this step has nowhere to run: %s",
-		subject, strings.Join(parts, "; "))
+	return &allLanesOutageError{msg: fmt.Sprintf("%s quota-exhausted, so this step has nowhere to run: %s",
+		subject, strings.Join(parts, "; "))}
 }
+
+// allLanesOutageError carries allLanesExhausted's message as a distinct type
+// so IsQuotaOutage can classify the aggregate structurally while callers
+// matching *LaneOutageError still (correctly) do not see one recoverable lane.
+type allLanesOutageError struct{ msg string }
+
+func (e *allLanesOutageError) Error() string { return e.msg }
 
 func truncateRunes(text string, max int) string {
 	runes := []rune(text)

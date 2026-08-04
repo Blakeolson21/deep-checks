@@ -36,6 +36,21 @@ func (e *LaneOutageError) Error() string {
 
 func (e *LaneOutageError) Unwrap() error { return e.cause }
 
+// IsQuotaOutage reports whether err says provider quota exhaustion is what
+// failed the invocation: a single lane's *LaneOutageError (skipped while
+// marked, or freshly classified from the provider banner) or the fallback
+// wrapper's every-eligible-lane aggregate. Telemetry classification keys on
+// this instead of substring-matching error text, which embeds provider banner
+// excerpts like "codex exited: ..." and would misfile the outage.
+func IsQuotaOutage(err error) bool {
+	var lane *LaneOutageError
+	if errors.As(err, &lane) {
+		return true
+	}
+	var all *allLanesOutageError
+	return errors.As(err, &all)
+}
+
 // LaneHealthStore is the slice of lanehealth.Store this package needs, kept as
 // an interface so tests and future callers can substitute their own.
 type LaneHealthStore interface {

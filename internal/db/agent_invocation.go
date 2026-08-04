@@ -20,6 +20,7 @@ const (
 	FallbackReasonExit        = "exit"        // resumed process exited non-zero
 	FallbackReasonSpawn       = "spawn"       // resumed process failed to start
 	FallbackReasonUnsupported = "unsupported" // adapter rejected a resume flag
+	FallbackReasonQuota       = "quota"       // provider quota exhausted on the session's lane
 	FallbackReasonOther       = "other"       // anything else
 )
 
@@ -60,7 +61,7 @@ type AgentInvocation struct {
 	CompletedAt     int64
 	DurationMS      int64
 	ExitStatus      string // ok | error | cancelled
-	FailureCategory string // parse | exit | spawn | cancelled | other ("" when ok)
+	FailureCategory string // parse | exit | spawn | quota | cancelled | other ("" when ok)
 	InputTokens     int
 	OutputTokens    int
 	CacheReadTokens int
@@ -227,16 +228,20 @@ func (d *DB) LatestSessionCumulative(runID, sessionKey string) (input, output, c
 // the read-only performance report. Nullable sums preserve unknown when no row
 // reported that metric. MetricsRows reports activity-metric coverage.
 type AgentInvocationAggregate struct {
-	Purpose             string
-	Count               int
-	TotalDurationMS     int64
-	AvgDurationMS       int64
-	SubprocessWaitMS    *int64
-	Cold                int
-	Started             int
-	Resumed             int
-	Fallback            int
-	Errors              int
+	Purpose          string
+	Count            int
+	TotalDurationMS  int64
+	AvgDurationMS    int64
+	SubprocessWaitMS *int64
+	Cold             int
+	Started          int
+	Resumed          int
+	Fallback         int
+	Errors           int
+	// Quota counts the invocations in Errors that failed on provider quota
+	// exhaustion (failure_category = "quota"), so quota cost is answerable
+	// per purpose without reading per-run detail.
+	Quota               int
 	InputTokens         int64
 	OutputTokens        int64
 	CacheReadTokens     int64
@@ -269,6 +274,7 @@ func (d *DB) AgentInvocationAggregates() ([]AgentInvocationAggregate, error) {
 		       COALESCE(SUM(CASE WHEN session_mode = 'resumed' THEN 1 ELSE 0 END), 0),
 		       COALESCE(SUM(CASE WHEN session_mode = 'fallback' THEN 1 ELSE 0 END), 0),
 		       COALESCE(SUM(CASE WHEN exit_status != 'ok' THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN failure_category = 'quota' THEN 1 ELSE 0 END), 0),
 		       COALESCE(SUM(input_tokens), 0),
 		       COALESCE(SUM(output_tokens), 0),
 		       COALESCE(SUM(cache_read_tokens), 0),
@@ -297,7 +303,7 @@ func (d *DB) AgentInvocationAggregates() ([]AgentInvocationAggregate, error) {
 		var a AgentInvocationAggregate
 		if err := rows.Scan(
 			&a.Purpose, &a.Count, &a.TotalDurationMS, &a.SubprocessWaitMS,
-			&a.Cold, &a.Started, &a.Resumed, &a.Fallback, &a.Errors,
+			&a.Cold, &a.Started, &a.Resumed, &a.Fallback, &a.Errors, &a.Quota,
 			&a.InputTokens, &a.OutputTokens, &a.CacheReadTokens, &a.CacheCreationTokens,
 			&a.FreshInputTokens, &a.ReasoningTokens, &a.ModelRoundtrips, &a.ToolCalls,
 			&a.ToolWaitCalls, &a.ToolTestLintCalls, &a.ToolEditCalls, &a.ToolReadCalls, &a.ToolGitCalls, &a.ToolOtherCalls,
