@@ -51,10 +51,84 @@ func RunBare(ctx context.Context, bareDir string, args ...string) (string, error
 	return runInDir(ctx, bareDir, append([]string{"--git-dir=" + bareDir}, args...)...)
 }
 
+// A git invocation must always be bounded, even when the caller hands down a
+// deadline-free context.
+//
+// Why: under `go test -race` on darwin, a fork child of the calling process can
+// wedge inside the race runtime (__tsan::TraceSwitchPartImpl) before it ever
+// reaches execve. fork clones only the calling thread, so that child has no
+// working Go runtime - no scheduler, no sysmon, no timer thread - and therefore
+// its own -test.timeout watchdog can never fire. The caller meanwhile blocks in
+// cmd.Wait forever. Observed: three such children spinning on a full core each
+// for 17+ hours against a 10m0s test timeout, after their parent's timeout
+// panicked it and reparented them to init.
+//
+// The bound cannot come from the child, so it comes from here. These are
+// deliberately generous ceilings for a pathological case, not pacing: git
+// plumbing in this codebase completes in seconds, and callers that need a
+// tighter bound pass their own deadline (branchsync uses 15s for its fetch).
+// They are vars so tests can shorten them.
+var (
+	defaultCommandTimeout = 5 * time.Minute
+	networkCommandTimeout = 60 * time.Minute
+)
+
+// commandWaitDelay bounds cmd.Wait after the process has exited or Cancel has
+// returned, so a surviving pipe holder - a credential helper or a hook that
+// inherited stdout - cannot wedge Wait indefinitely. It matches the shellenv
+// helper's backstop; it is a worst-case ceiling only, since a clean exit closes
+// the pipes immediately and Wait returns without waiting.
+const commandWaitDelay = 5 * time.Second
+
+// networkSubcommands reach a remote and get the longer ceiling. "remote" and
+// "submodule" are included because some of their forms are network operations;
+// over-granting the ceiling is safe, under-granting breaks real work.
+var networkSubcommands = map[string]struct{}{
+	"clone":     {},
+	"fetch":     {},
+	"ls-remote": {},
+	"pull":      {},
+	"push":      {},
+	"remote":    {},
+	"submodule": {},
+}
+
+// gitSubcommand returns the first non-flag argument, so a leading --git-dir=
+// (added by RunBare) does not hide the subcommand.
+func gitSubcommand(args []string) string {
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		return a
+	}
+	return ""
+}
+
+func commandTimeout(args []string) time.Duration {
+	if _, ok := networkSubcommands[gitSubcommand(args)]; ok {
+		return networkCommandTimeout
+	}
+	return defaultCommandTimeout
+}
+
+// runInDir executes git and returns trimmed stdout.
+//
+// Cancelling the context kills git's own PID, which is exactly the process that
+// wedges in the case above. A grandchild of git that outlives it is a different
+// leak class, owned by the transitive process-tree reap in
+// docs/superpowers/specs/2026-07-25-process-tree-reap-design.md; commandWaitDelay
+// keeps such a survivor from wedging Wait here in the meantime.
 func runInDir(ctx context.Context, dir string, args ...string) (string, error) {
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, commandTimeout(args))
+		defer cancel()
+	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = NonInteractiveEnv(dir)
+	cmd.WaitDelay = commandWaitDelay
 	winproc.Harden(cmd)
 	out, err := cmd.Output()
 	if err != nil {
