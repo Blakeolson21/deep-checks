@@ -113,12 +113,20 @@ func newDoctorCmd() *cobra.Command {
 				// A lane suppressed by a quota cooldown is installed and healthy-looking
 				// but will not be used until it resets, so doctor is where that
 				// otherwise-invisible state has to surface.
+				var liveOutages []lanehealth.Outage
 				laneOutages := map[string]lanehealth.Outage{}
 				if p != nil {
-					for _, outage := range lanehealth.NewStore(p.LaneHealthFile(), nil).Snapshot() {
+					liveOutages = lanehealth.NewStore(p.LaneHealthFile(), nil).Snapshot()
+					for _, outage := range liveOutages {
 						laneOutages[outage.Lane] = outage
 					}
 				}
+				quotaDetail := func(outage lanehealth.Outage) string {
+					return fmt.Sprintf("quota-exhausted until %s %s",
+						outage.Until.Local().Format("2006-01-02 15:04 MST"),
+						sDim.Render("(skipped by the pipeline, probed hourly for early recovery)"))
+				}
+				reportedLanes := map[string]bool{}
 
 				agents := doctorAgentChecks()
 				fmt.Fprintln(w)
@@ -133,12 +141,12 @@ func newDoctorCmd() *cobra.Command {
 							found = append(found, path)
 						}
 					}
-					outage, exhausted := laneOutages[agent.LaneName(types.AgentName(a.name))]
+					lane := agent.LaneName(types.AgentName(a.name))
+					outage, exhausted := laneOutages[lane]
 					switch {
 					case len(missing) == 0 && exhausted:
-						warn(label, fmt.Sprintf("quota-exhausted until %s %s",
-							outage.Until.Local().Format("2006-01-02 15:04 MST"),
-							sDim.Render("(skipped by the pipeline, probed hourly for early recovery)")))
+						reportedLanes[lane] = true
+						warn(label, quotaDetail(outage))
 					case len(missing) == 0:
 						ok(label, strings.Join(found, ", "))
 					case len(a.binaries) > 1:
@@ -146,6 +154,18 @@ func newDoctorCmd() *cobra.Command {
 					default:
 						warn(label, "not found")
 					}
+				}
+
+				// The pipeline honors whatever the store recorded, and a lane
+				// configured as an explicit acp:<target> - or under any other name
+				// this list does not enumerate - is recorded under a key with no row
+				// above. The recorded state, not the enumeration, decides what a
+				// cooldown-invisibility surface has to show.
+				for _, outage := range liveOutages {
+					if reportedLanes[outage.Lane] {
+						continue
+					}
+					warn(fmt.Sprintf("%-14s", outage.Lane), quotaDetail(outage))
 				}
 
 				if p == nil {
