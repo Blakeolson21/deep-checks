@@ -69,8 +69,8 @@ func RunBare(ctx context.Context, bareDir string, args ...string) (string, error
 // tighter bound pass their own deadline (branchsync uses 15s for its fetch).
 // They are vars so tests can shorten them.
 var (
-	defaultCommandTimeout = 5 * time.Minute
-	networkCommandTimeout = 60 * time.Minute
+	defaultCommandTimeout  = 5 * time.Minute
+	extendedCommandTimeout = 60 * time.Minute
 )
 
 // commandWaitDelay bounds cmd.Wait after the process has exited or Cancel has
@@ -108,6 +108,28 @@ var networkSubcommands = map[string]struct{}{
 	"submodule": {},
 }
 
+// treeSubcommands materialize or rewrite a working tree, so their cost scales
+// with repository size and filesystem speed instead of finishing in seconds
+// like the rest of this package's plumbing. `git worktree add --detach` builds
+// every run's worktree from a deadline-free daemon context, and on a large
+// repository - or on Windows, where each file creation is Defender-taxed by
+// roughly the same factor the CI comment measures for process spawns - that
+// checkout can legitimately outlast the plumbing ceiling. Killing it would fail
+// the run outright, and the ceiling exists to bound a pathological wedge rather
+// than to pace real work, so these share the network tier's headroom.
+var treeSubcommands = map[string]struct{}{
+	"add":       {},
+	"apply":     {},
+	"checkout":  {},
+	"merge":     {},
+	"read-tree": {},
+	"rebase":    {},
+	"reset":     {},
+	"restore":   {},
+	"stash":     {},
+	"worktree":  {},
+}
+
 // globalOptionsWithSeparateValue are the git global options whose value is its
 // own argument, so that value must not be mistaken for the subcommand. The
 // attached forms (--git-dir=<path>) need no entry, because they are a single
@@ -136,8 +158,12 @@ func gitSubcommand(args []string) string {
 }
 
 func commandTimeout(args []string) time.Duration {
-	if _, ok := networkSubcommands[gitSubcommand(args)]; ok {
-		return networkCommandTimeout
+	sub := gitSubcommand(args)
+	if _, ok := networkSubcommands[sub]; ok {
+		return extendedCommandTimeout
+	}
+	if _, ok := treeSubcommands[sub]; ok {
+		return extendedCommandTimeout
 	}
 	return defaultCommandTimeout
 }
@@ -154,27 +180,77 @@ func commandTimeout(args []string) time.Duration {
 // leak class, owned by the transitive process-tree reap in
 // docs/superpowers/specs/2026-07-25-process-tree-reap-design.md; commandWaitDelay
 // keeps such a survivor from wedging Wait here in the meantime.
-func newCommand(ctx context.Context, args ...string) (*exec.Cmd, context.CancelFunc) {
+func newCommand(ctx context.Context, args ...string) *boundedCommand {
 	cancel := context.CancelFunc(func() {})
+	var ceiling time.Duration
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		ctx, cancel = context.WithTimeout(ctx, commandTimeout(args))
+		ceiling = commandTimeout(args)
+		ctx, cancel = context.WithTimeout(ctx, ceiling)
 	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.WaitDelay = commandWaitDelay
 	winproc.Harden(cmd)
-	return cmd, cancel
+	return &boundedCommand{Cmd: cmd, ctx: ctx, cancel: cancel, ceiling: ceiling}
+}
+
+// boundedCommand is a git subprocess carrying the bound this package supplied,
+// so the constructor that applies the bound is also the one that explains it.
+// ceiling is zero when the caller's own context already carried a deadline.
+type boundedCommand struct {
+	*exec.Cmd
+	ctx     context.Context
+	cancel  context.CancelFunc
+	ceiling time.Duration
+}
+
+func (c *boundedCommand) close() { c.cancel() }
+
+// explain names the bound that produced a failure, because both bounds
+// otherwise surface as something the caller cannot act on.
+//
+// A ceiling kill arrives as *exec.ExitError "signal: killed" with the context
+// error dropped, which reads like git itself died. An expired WaitDelay arrives
+// as exec.ErrWaitDelay after git exited 0, and exec DISCARDS the captured
+// output in that case, so the caller sees a failure for a command that
+// succeeded. Callers in this package fail closed on error, so both need to say
+// which bound fired: the whole point of bounding these subprocesses is to turn
+// a permanent unexplained wedge into a diagnosable error.
+func (c *boundedCommand) explain(err error) error {
+	if err == nil {
+		return nil
+	}
+	if c.ceiling > 0 && errors.Is(c.ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("exceeded the %s internal/git ceiling: %w", c.ceiling, err)
+	}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		return fmt.Errorf("git exited but a surviving child held its output pipe past the %s wait delay, so its output was discarded: %w", commandWaitDelay, err)
+	}
+	return err
+}
+
+func (c *boundedCommand) run() error { return c.explain(c.Cmd.Run()) }
+
+func (c *boundedCommand) output() ([]byte, error) {
+	out, err := c.Cmd.Output()
+	return out, c.explain(err)
+}
+
+func (c *boundedCommand) combinedOutput() ([]byte, error) {
+	out, err := c.Cmd.CombinedOutput()
+	return out, c.explain(err)
 }
 
 // runInDir executes git and returns trimmed stdout.
 func runInDir(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd, cancel := newCommand(ctx, args...)
-	defer cancel()
+	cmd := newCommand(ctx, args...)
+	defer cmd.close()
 	cmd.Dir = dir
 	cmd.Env = NonInteractiveEnv(dir)
-	out, err := cmd.Output()
+	out, err := cmd.output()
 	if err != nil {
 		stderr := ""
-		if ee, ok := err.(*exec.ExitError); ok {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
 			stderr = strings.TrimSpace(string(ee.Stderr))
 		}
 		return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(stderr))
@@ -230,9 +306,9 @@ func isBareGitDir(dir string) bool {
 
 // InitBare creates a new bare git repository at the given path.
 func InitBare(ctx context.Context, path string) error {
-	cmd, cancel := newCommand(ctx, "init", "--bare", path)
-	defer cancel()
-	out, err := cmd.CombinedOutput()
+	cmd := newCommand(ctx, "init", "--bare", path)
+	defer cmd.close()
+	out, err := cmd.combinedOutput()
 	if err != nil {
 		return fmt.Errorf("git init --bare: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -306,12 +382,12 @@ func FindGitRoot(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	cmd, cancel := newCommand(context.Background(), "rev-parse", "--show-toplevel")
-	defer cancel()
+	cmd := newCommand(context.Background(), "rev-parse", "--show-toplevel")
+	defer cmd.close()
 	cmd.Dir = abs
-	out, err := cmd.Output()
+	out, err := cmd.output()
 	if err != nil {
-		return "", fmt.Errorf("not a git repository: %s", abs)
+		return "", fmt.Errorf("not a git repository: %s: %w", abs, err)
 	}
 	root := strings.TrimSpace(string(out))
 	resolved, err := filepath.EvalSymlinks(root)
@@ -348,12 +424,12 @@ func FindMainRepoRoot(path string) (string, error) {
 	}
 
 	// Resolve the git common dir.
-	commonDirCmd, cancelCommonDir := newCommand(context.Background(), "rev-parse", "--git-common-dir")
-	defer cancelCommonDir()
+	commonDirCmd := newCommand(context.Background(), "rev-parse", "--git-common-dir")
+	defer commonDirCmd.close()
 	commonDirCmd.Dir = abs
-	commonDirOut, err := commonDirCmd.Output()
+	commonDirOut, err := commonDirCmd.output()
 	if err != nil {
-		return "", fmt.Errorf("not a git repository: %s", abs)
+		return "", fmt.Errorf("not a git repository: %s: %w", abs, err)
 	}
 	commonDir := strings.TrimSpace(string(commonDirOut))
 	if !filepath.IsAbs(commonDir) {
@@ -371,9 +447,9 @@ func FindMainRepoRoot(path string) (string, error) {
 	// itself for its core.worktree, which git writes when it absorbs a
 	// submodule's git dir. The value is typically relative (e.g.
 	// "../../../sub"); resolve it against the common dir.
-	worktreeCmd, cancelWorktree := newCommand(context.Background(), "--git-dir", commonDir, "config", "--get", "core.worktree")
-	defer cancelWorktree()
-	if worktreeOut, err := worktreeCmd.Output(); err == nil {
+	worktreeCmd := newCommand(context.Background(), "--git-dir", commonDir, "config", "--get", "core.worktree")
+	defer worktreeCmd.close()
+	if worktreeOut, err := worktreeCmd.output(); err == nil {
 		worktree := strings.TrimSpace(string(worktreeOut))
 		if worktree != "" {
 			if !filepath.IsAbs(worktree) {
@@ -385,12 +461,12 @@ func FindMainRepoRoot(path string) (string, error) {
 
 	// Branch 3: exotic GIT_DIR without a usable core.worktree. Defer to
 	// `git rev-parse --show-toplevel` from the original path.
-	topCmd, cancelTop := newCommand(context.Background(), "rev-parse", "--show-toplevel")
-	defer cancelTop()
+	topCmd := newCommand(context.Background(), "rev-parse", "--show-toplevel")
+	defer topCmd.close()
 	topCmd.Dir = abs
-	topOut, err := topCmd.Output()
+	topOut, err := topCmd.output()
 	if err != nil {
-		return "", fmt.Errorf("not a git repository: %s", abs)
+		return "", fmt.Errorf("not a git repository: %s: %w", abs, err)
 	}
 	return resolveMainRoot(strings.TrimSpace(string(topOut)))
 }
@@ -496,11 +572,12 @@ func CurrentBranch(ctx context.Context, dir string) (string, error) {
 // (HEAD points at a commit rather than a branch ref). Uses `git symbolic-ref`
 // which fails cleanly when HEAD is not a symbolic ref.
 func IsDetachedHEAD(ctx context.Context, dir string) (bool, error) {
-	cmd, cancel := newCommand(ctx, "symbolic-ref", "-q", "HEAD")
-	defer cancel()
+	cmd := newCommand(ctx, "symbolic-ref", "-q", "HEAD")
+	defer cmd.close()
 	cmd.Dir = dir
-	if err := cmd.Run(); err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
+	if err := cmd.run(); err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
 			// Exit 1 means HEAD is not a symbolic ref — detached.
 			if ee.ExitCode() == 1 {
 				return true, nil
@@ -723,10 +800,10 @@ func ResolveRef(ctx context.Context, dir, ref string) (string, error) {
 // `git rev-parse --verify --quiet` so a missing ref is a clean (nil, false)
 // result rather than a loud error.
 func RefExists(ctx context.Context, dir, ref string) (bool, error) {
-	cmd, cancel := newCommand(ctx, "-C", dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
-	defer cancel()
+	cmd := newCommand(ctx, "-C", dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	defer cmd.close()
 	cmd.Env = NonInteractiveEnv(dir)
-	if err := cmd.Run(); err != nil {
+	if err := cmd.run(); err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && ee.ExitCode() == 1 {
 			return false, nil

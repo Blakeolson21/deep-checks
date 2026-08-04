@@ -1,8 +1,12 @@
+//go:build unix
+
 package git
 
 import (
 	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,6 +18,11 @@ import (
 // These tests model the leak that left spinning orphan test binaries behind for
 // 17+ hours: a git child that stops making progress and is never bounded. See
 // the defaultCommandTimeout comment for the ThreadSanitizer fork mechanism.
+//
+// They are unix-only because they observe real process lifetimes: the fixtures
+// are /bin/sh scripts and the liveness checks are signal 0, neither of which
+// exists on Windows, where this package's tests also run. The platform-agnostic
+// halves of the same bounds live in git_bounds_test.go.
 
 // fakeGitDir returns a directory placed first on PATH, for the caller to write
 // a fake `git` into. Scripts must use absolute /bin utilities: the child runs
@@ -196,44 +205,32 @@ func TestEveryPackageHelperBoundsItsGitChild(t *testing.T) {
 	}
 }
 
-// TestCommandWaitDelay_StaysGenerousEnoughForALoadedHost guards a value that
-// reads like a tidy-up candidate but is load-bearing. When the delay expires,
-// exec reports ErrWaitDelay and discards the output of a git command that
-// exited 0, and callers in this package fail closed on error, so a tight delay
-// converts host load into a false "not clean" verdict that blocks custody
-// recovery. Verified directly: a command exiting 0 with a pipe-holding
-// descendant returns ErrWaitDelay and empty output. The delay therefore has to
-// clear scheduler starvation on a loaded host (the incident host sat at load
-// 160), not merely a fast local run.
-func TestCommandWaitDelay_StaysGenerousEnoughForALoadedHost(t *testing.T) {
-	const floor = 30 * time.Second
-	if commandWaitDelay < floor {
-		t.Fatalf("commandWaitDelay = %s, below the %s floor: a delay this tight makes a loaded host report succeeding git commands as failures, and callers here fail closed on that error", commandWaitDelay, floor)
-	}
-}
+// TestRun_WaitDelayExpiryExplainsTheDiscardedOutput covers the second bound's
+// diagnosis. git exits 0, a surviving descendant still holds the inherited
+// stdout pipe, the WaitDelay expires, and exec reports ErrWaitDelay while
+// DISCARDING the output of a command that actually succeeded. Callers here fail
+// closed on error, so this has to say what happened rather than surface as an
+// unexplained failure of a successful command.
+func TestRun_WaitDelayExpiryExplainsTheDiscardedOutput(t *testing.T) {
+	binDir := fakeGitDir(t)
+	gpidFile := filepath.Join(binDir, "grandchild.pid")
+	// The background sleeper inherits git's stdout and outlives it; git itself
+	// exits 0 immediately.
+	writeFakeGit(t, binDir, "/bin/sleep 600 &\necho $! > "+gpidFile+"\nexit 0\n")
+	t.Cleanup(func() { reapPIDFile(gpidFile) })
 
-func TestCommandTimeout_GivesNetworkSubcommandsTheLongerCeiling(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		args []string
-		want time.Duration
-	}{
-		{"plumbing", []string{"rev-parse", "HEAD"}, defaultCommandTimeout},
-		{"network fetch", []string{"fetch", "--no-tags", "origin"}, networkCommandTimeout},
-		{"network behind a leading flag", []string{"--git-dir=/tmp/x.git", "fetch", "origin"}, networkCommandTimeout},
-		{"plumbing behind a leading flag", []string{"--git-dir=/tmp/x.git", "rev-parse", "HEAD"}, defaultCommandTimeout},
-		{"no subcommand", []string{"--version"}, defaultCommandTimeout},
-		// A global option whose value is a separate argument must not let that
-		// value pose as the subcommand; RefExists passes exactly this shape.
-		{"plumbing behind -C", []string{"-C", "/tmp/repo", "rev-parse", "HEAD"}, defaultCommandTimeout},
-		{"network behind -C", []string{"-C", "/tmp/repo", "fetch", "origin"}, networkCommandTimeout},
-		{"network behind separated --git-dir", []string{"--git-dir", "/tmp/x.git", "push", "origin"}, networkCommandTimeout},
-		{"network behind -c", []string{"-c", "gc.auto=0", "fetch", "origin"}, networkCommandTimeout},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := commandTimeout(tc.args); got != tc.want {
-				t.Errorf("commandTimeout(%q) = %s, want %s", tc.args, got, tc.want)
-			}
-		})
+	restoreDelay := commandWaitDelay
+	commandWaitDelay = time.Second
+	t.Cleanup(func() { commandWaitDelay = restoreDelay })
+
+	_, err := Run(context.Background(), t.TempDir(), "status", "--porcelain")
+	if err == nil {
+		t.Fatal("expected an error once the wait delay expired and exec discarded the output")
+	}
+	if !errors.Is(err, exec.ErrWaitDelay) {
+		t.Errorf("error does not unwrap to exec.ErrWaitDelay, so a caller cannot tell a discarded-output bound from a real git failure: %v", err)
+	}
+	if !strings.Contains(err.Error(), "discarded") {
+		t.Errorf("error does not say the output of a succeeding command was discarded: %v", err)
 	}
 }
