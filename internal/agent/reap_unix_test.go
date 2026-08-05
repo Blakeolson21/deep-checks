@@ -22,12 +22,31 @@ const nativeAgentEscapedPipeHelperEnv = "NM_AGENT_NATIVE_PIPE_HELPER"
 
 const nativeAgentReapEscapeHelperEnv = "NM_AGENT_NATIVE_REAP_HELPER"
 
+// unsampledSpawnDelay is how long the escaped-pipe-holder leader idles before
+// spawning its holder. It must exceed internal/shellenv's first sampling
+// interval so the holder appears after that sample and before the next one,
+// which is a whole tracker tick away.
+const unsampledSpawnDelay = 3 * time.Second
+
 // TestNativeAgentCommand_WaitDelayClosesEscapedPipeHolder proves the WaitDelay
-// backstop alone, so it deliberately does NOT assert that the setsid() escapee
-// is reaped: its leader exits in milliseconds, well inside the descendant
-// poller's first sampling interval, so nothing was ever sampled beneath it and
-// the reap has no pid list to work from. That is why the escapee is SIGKILLed by
-// hand in t.Cleanup here.
+// backstop alone, so it deliberately does NOT assert that the escaped pipe
+// holder is reaped: nothing beneath the leader was ever sampled, so the reap has
+// no pid list to work from. That is why the holder is SIGKILLed by hand in
+// t.Cleanup here.
+//
+// Keeping the holder unsampled has to be arranged deliberately rather than
+// assumed. A leader that merely "exits quickly" does not achieve it: this leader
+// is a race-instrumented re-exec of the test binary, whose runtime and testing
+// startup alone can take about as long as the poller's first sampling interval,
+// so the first sample lands inside its lifetime. Instead the leader outlives that
+// first sample on purpose and only then spawns the holder, which leaves the next
+// sample a full tracker tick away - far beyond the reap. If that ordering is ever
+// lost the holder is reaped, the pipe closes on a clean EOF, and the assertions
+// below fail rather than quietly testing the reaper instead of the backstop.
+//
+// The holder leaves the leader's process group at fork through Setpgid rather
+// than by calling setsid() once it boots, so "out of reach of kill(-leaderPID)"
+// is true from the instant it exists; the precondition below checks that.
 //
 // This is not a blessing of the escape. It mirrors the deliberate split in
 // internal/shellenv, where TestCombinedOutputShellCommand_WaitDelayBoundsEscapedPipeHolder
@@ -38,12 +57,10 @@ const nativeAgentReapEscapeHelperEnv = "NM_AGENT_NATIVE_REAP_HELPER"
 // TestNativeAgentCommand_TerminateReapsSetsidEscapeeAfterSampling.
 func TestNativeAgentCommand_WaitDelayClosesEscapedPipeHolder(t *testing.T) {
 	dir := t.TempDir()
-	readyFile := filepath.Join(dir, "ready")
 	pidFile := filepath.Join(dir, "escaped.pid")
 	cmd := exec.CommandContext(context.Background(), os.Args[0], "-test.run=^TestNativeAgentEscapedPipeHelper$")
 	cmd.Env = append(os.Environ(),
 		nativeAgentEscapedPipeHelperEnv+"=leader",
-		"NM_AGENT_NATIVE_PIPE_READY="+readyFile,
 		"NM_AGENT_NATIVE_PIPE_PID="+pidFile,
 	)
 	shellenv.ConfigureShellCommand(cmd)
@@ -68,7 +85,10 @@ func TestNativeAgentCommand_WaitDelayClosesEscapedPipeHolder(t *testing.T) {
 	var rr readResult
 	select {
 	case rr = <-readCh:
-	case <-time.After(2 * time.Second):
+	// The budget covers the leader's deliberate idle before it spawns the
+	// holder, plus WaitDelay. A reader still blocked past that is the wedge this
+	// test exists to rule out.
+	case <-time.After(unsampledSpawnDelay + 10*time.Second):
 		started.closePipes()
 		started.terminate()
 		if b, err := os.ReadFile(pidFile); err == nil {
@@ -83,6 +103,17 @@ func TestNativeAgentCommand_WaitDelayClosesEscapedPipeHolder(t *testing.T) {
 	t.Cleanup(func() {
 		_ = syscall.Kill(escapedPID, syscall.SIGKILL)
 	})
+	// Precondition: the holder really did leave the leader's process group, so
+	// the group kill inside terminate() could not have closed the pipe. Without
+	// this the test could pass for the wrong reason - a holder still inside the
+	// group is reaped, and the pipe closes on a clean EOF rather than on the
+	// backstop under test.
+	if pgid, pgidErr := syscall.Getpgid(escapedPID); pgidErr != nil {
+		t.Fatalf("precondition: read pipe holder %d pgid: %v", escapedPID, pgidErr)
+	} else if pgid == cmd.Process.Pid {
+		t.Fatalf("precondition failed: pipe holder %d is still in the leader's group %d, "+
+			"so the reaper, not WaitDelay, would close the pipe", escapedPID, cmd.Process.Pid)
+	}
 	if !strings.Contains(rr.output, "leader done\n") {
 		t.Fatalf("stdout output = %q, want leader output", rr.output)
 	}
@@ -196,23 +227,32 @@ func TestNativeAgentReapEscapeHelper(t *testing.T) {
 func TestNativeAgentEscapedPipeHelper(t *testing.T) {
 	switch os.Getenv(nativeAgentEscapedPipeHelperEnv) {
 	case "leader":
+		// Idle past the descendant poller's first sample before spawning
+		// anything, so the holder is born into the long gap before the next one
+		// and is never sampled. Spawning first and exiting fast is the version
+		// that does not work: this binary's own race-instrumented startup is
+		// comparable to that first interval, so the sample lands while the leader
+		// is still alive and the holder gets reaped instead of bounded by
+		// WaitDelay. The interval and tick live in internal/shellenv and are not
+		// exported, so this waits on wall time with a margin.
+		time.Sleep(unsampledSpawnDelay)
 		child := exec.Command(os.Args[0], "-test.run=^TestNativeAgentEscapedPipeHelper$")
-		child.Env = append(os.Environ(), nativeAgentEscapedPipeHelperEnv+"=escaped",
-			"NM_AGENT_NATIVE_PIPE_READY="+os.Getenv("NM_AGENT_NATIVE_PIPE_READY"))
+		child.Env = append(os.Environ(), nativeAgentEscapedPipeHelperEnv+"=escaped")
+		// The holder inherits this leader's stdout/stderr - the agent command's
+		// pipes - and leaves the leader's process group at fork, so kill(-leader)
+		// cannot reach it and it keeps those write ends open. Setpgid is applied
+		// by the parent before exec, so the escape is complete the moment the
+		// child exists rather than only once it has scheduled and called setsid().
+		child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		child.Stdout = os.Stdout
 		child.Stderr = os.Stderr
 		if err := child.Start(); err != nil {
 			os.Exit(2)
 		}
 		_ = os.WriteFile(os.Getenv("NM_AGENT_NATIVE_PIPE_PID"), []byte(strconv.Itoa(child.Process.Pid)), 0o644)
-		if !waitForNativeAgentPipeHelperReady(os.Getenv("NM_AGENT_NATIVE_PIPE_READY"), 5*time.Second) {
-			os.Exit(3)
-		}
 		_, _ = os.Stdout.WriteString("leader done\nescaped pid " + strconv.Itoa(child.Process.Pid) + "\n")
 		os.Exit(0)
 	case "escaped":
-		_, _ = syscall.Setsid()
-		_ = os.WriteFile(os.Getenv("NM_AGENT_NATIVE_PIPE_READY"), []byte("ready"), 0o644)
 		time.Sleep(30 * time.Second)
 		os.Exit(0)
 	}

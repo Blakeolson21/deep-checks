@@ -113,7 +113,13 @@ func TestComputeProtectedPIDs_IncludesOwnProcessGroup(t *testing.T) {
 func stubWedgedPS(t *testing.T) func() {
 	t.Helper()
 	stub := filepath.Join(t.TempDir(), "ps")
-	if err := os.WriteFile(stub, []byte("#!/bin/sh\nsleep 120\n"), 0o755); err != nil {
+	// exec, not a plain call: runPS bounds its child with exec.CommandContext,
+	// which signals only the pid it started. A shell that forks the sleep and
+	// waits on it leaves that sleep alive and reparented to pid 1 when the bound
+	// kills the shell, so this helper would leak a real orphan per run - the
+	// exact leak class this package exists to close. exec makes the stub one
+	// process, which is also what a genuinely wedged ps is.
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexec sleep 120\n"), 0o755); err != nil {
 		t.Fatalf("write ps stub: %v", err)
 	}
 	prevPath, prevTimeout, prevDelay := psPath, psTimeout, psWaitDelay
