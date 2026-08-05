@@ -253,6 +253,35 @@ func TestKillGroups_KillsGroupWhoseLeaderStillMatches(t *testing.T) {
 	}
 }
 
+// TestKillGroups_RefusesProtectedGroupLeaders is the group-kill blast-radius
+// guard. Verifying that a pgid still names the process sampling saw says nothing
+// about whether signalling it is survivable: this process's own group holds the
+// daemon and the service supervisor, and pid 1's holds the machine. A start-time
+// check passes on all of them.
+func TestKillGroups_RefusesProtectedGroupLeaders(t *testing.T) {
+	started := time.Date(2026, time.July, 21, 17, 9, 0, 0, time.UTC)
+	self, parent := os.Getpid(), os.Getppid()
+	sampled := []Proc{
+		{PID: 1, PPID: 0, PGID: 1, Started: started},
+		{PID: self, PPID: parent, PGID: self, Started: started},
+		{PID: parent, PPID: 1, PGID: parent, Started: started},
+	}
+
+	var signalled []int
+	defer swapForTest(
+		func([]int) (map[int]time.Time, error) {
+			return map[int]time.Time{1: started, self: started, parent: started}, nil
+		},
+		func(pid int, sig syscall.Signal) error { signalled = append(signalled, pid); return nil },
+	)()
+
+	KillGroups([]int{1, self, parent}, sampled)
+
+	if len(signalled) != 0 {
+		t.Fatalf("KillGroups signalled protected groups %v, want none", signalled)
+	}
+}
+
 // TestKillGroups_SkipsUnrecordedGroupLeader fails closed: with no sampled start
 // time for the group leader there is nothing to verify against, and an
 // unverifiable group kill is exactly what this guard exists to prevent.

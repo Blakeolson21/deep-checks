@@ -22,3 +22,6 @@ func killProcess(int, syscall.Signal) error { return errUnsupported }
 
 // killGroup is a no-op outside unix.
 func killGroup(int) {}
+
+// processGroup has no meaning outside unix; 0 is never a kill candidate.
+func processGroup() int { return 0 }

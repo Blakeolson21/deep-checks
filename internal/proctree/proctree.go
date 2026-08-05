@@ -9,8 +9,9 @@
 //
 // The package knows nothing about runs, steps, or configuration. It is
 // deliberately small so its blast radius is auditable: every per-pid kill and
-// group kill is guarded by a freshly re-read start time. Per-pid kills also
-// refuse pid 1, the current process, and the current process's ancestors.
+// group kill is guarded by a freshly re-read start time, and both also refuse a
+// protected pid - pid 0 and 1, the current process, its ancestors, and the
+// leader of its own process group.
 package proctree
 
 import (
@@ -207,10 +208,17 @@ func Kill(procs []Proc) {
 // setsid() escapee leads its own group and is therefore always sampled into the
 // descendant union alongside it. A group with no recorded leader fails closed
 // and is skipped; the start-time-guarded per-pid Kill still covers its members.
+//
+// Protected pids are refused before verification for the same reason the per-pid
+// kill refuses them: no walk that starts from a Setpgid-isolated leader can
+// reach our own ancestry today, but the cost of a future one that does is the
+// daemon signalling its own group, so the guard belongs on the wider-blast-radius
+// operation rather than only on the narrower one.
 func KillGroups(groups []int, recorded []Proc) {
 	if len(groups) == 0 {
 		return
 	}
+	protected := protectedPIDs()
 	sampledStart := make(map[int]time.Time, len(recorded))
 	for _, p := range recorded {
 		sampledStart[p.PID] = p.Started
@@ -218,6 +226,9 @@ func KillGroups(groups []int, recorded []Proc) {
 
 	verify := make([]int, 0, len(groups))
 	for _, pgid := range groups {
+		if protected[pgid] {
+			continue
+		}
 		if _, ok := sampledStart[pgid]; ok {
 			verify = append(verify, pgid)
 		}
@@ -247,8 +258,10 @@ var (
 )
 
 // protectedPIDs is the set that must never be signalled: pid 0 and 1, the
-// current process, and every ancestor of the current process. Under the daemon
-// those ancestors include the daemon itself and the service supervisor.
+// current process, every ancestor of the current process, and the leader of the
+// current process's own group. Under the daemon those ancestors include the
+// daemon itself and the service supervisor, and the group leader is what a
+// mistaken group kill would take down wholesale.
 //
 // Strictly this is belt and braces - our own ancestors sit above us in the tree
 // and cannot appear among a command's descendants - but the cost of a bug in the
@@ -262,6 +275,9 @@ func protectedPIDs() map[int]bool {
 
 func computeProtectedPIDs() map[int]bool {
 	protected := map[int]bool{0: true, 1: true, os.Getpid(): true}
+	if pgrp := processGroup(); pgrp > 1 {
+		protected[pgrp] = true
+	}
 	snap, err := snapshotFunc()
 	if err != nil {
 		return protected
