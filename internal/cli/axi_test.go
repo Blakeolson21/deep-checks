@@ -376,6 +376,45 @@ func TestGateNote_ReviewOnly(t *testing.T) {
 	}
 }
 
+// TestGateNote_SpentFixCap verifies a gate whose fix-round cap is spent says so
+// at the point of use and stops advertising a plain fix, which the daemon would
+// refuse. A gate with budget left keeps the ordinary help.
+func TestGateNote_SpentFixCap(t *testing.T) {
+	mk := func(limit, rounds int) string {
+		gate := stepView{
+			Name:   "review",
+			Status: "fix_review",
+			FindingsJSON: findingsJSON(t, []types.Finding{
+				{ID: "review-1", Severity: "error", File: "main.go", Action: types.ActionAutoFix, Description: "bug"},
+			}, "1 issue"),
+			AutoFixLimit: limit,
+			RoundCount:   rounds,
+		}
+		return axiDoc(gateFields(gate)...)
+	}
+
+	spent := mk(2, 3)
+	for _, want := range []string{
+		"auto_fix.review cap 2 reached",
+		"--override-fix-cap",
+	} {
+		if !strings.Contains(spent, want) {
+			t.Errorf("spent-cap gate missing %q in:\n%s", want, spent)
+		}
+	}
+	if strings.Contains(spent, "--action fix --findings <ids>` to have the pipeline fix") {
+		t.Errorf("spent-cap gate should not advertise a fix the daemon refuses:\n%s", spent)
+	}
+
+	remaining := mk(2, 2)
+	if strings.Contains(remaining, "cap 2 reached") {
+		t.Errorf("gate with budget left should not claim a spent cap:\n%s", remaining)
+	}
+	if !strings.Contains(remaining, "to have the pipeline fix the selected findings") {
+		t.Errorf("gate with budget left should still advertise fix:\n%s", remaining)
+	}
+}
+
 func TestParseAddFinding(t *testing.T) {
 	f, err := parseAddFinding(`{"description":"add a nil check","action":"auto-fix","file":"x.go"}`)
 	if err != nil {

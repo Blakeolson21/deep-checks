@@ -8,6 +8,7 @@ import (
 
 	toon "github.com/toon-format/toon-go"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -437,6 +438,13 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 	return toon.Field{Key: key, Value: toon.NewObject(fields...)}
 }
 
+func roundWord(n int) string {
+	if n == 1 {
+		return "round"
+	}
+	return "rounds"
+}
+
 // gateFields renders the active approval gate: the awaiting step, its findings
 // table, and the next-step commands an agent can run to clear it.
 func gateFields(gate stepView) []toon.Field {
@@ -457,6 +465,15 @@ func gateFields(gate stepView) []toon.Field {
 	if gate.Name == string(types.StepReview) {
 		gfields = append(gfields, toon.Field{Key: "note", Value: "Review auto-fix is disabled by default (`auto_fix.review: 0`; a repo or global `auto_fix.review > 0` override re-enables it), so blocking and ask-user review findings park for your decision rather than being silently self-fixed."})
 	}
+	// A spent fix-round cap is stated at the gate, because it changes which
+	// responses are even available: the daemon refuses a plain fix here.
+	capSpent := config.FixRoundCapReached(gate.AutoFixLimit, gate.RoundCount)
+	if capSpent {
+		gfields = append(gfields, toon.Field{Key: "fix_cap", Value: fmt.Sprintf(
+			"auto_fix.%s cap %d reached (%d fix %s funded). This step will not fund another fix round: approve, skip, or abort - or, if another round is genuinely worth it, re-fund exactly one with `--override-fix-cap` (recorded in the run).",
+			gate.Name, gate.AutoFixLimit, config.FixRoundsUsed(gate.RoundCount),
+			roundWord(config.FixRoundsUsed(gate.RoundCount)))})
+	}
 	rows := make([]findingRow, 0, len(parsed.Items))
 	for _, f := range parsed.Items {
 		rows = append(rows, findingRow{
@@ -469,11 +486,15 @@ func gateFields(gate stepView) []toon.Field {
 	}
 	gfields = append(gfields, toon.Field{Key: "findings", Value: rows})
 
+	fixHelp := "Run `no-mistakes axi respond --action fix --findings <ids>` to have the pipeline fix the selected findings (do not edit files yourself)"
+	if capSpent {
+		fixHelp = "Run `no-mistakes axi respond --action fix --findings <ids> --override-fix-cap` ONLY if another fix round is genuinely worth it - the ordinary fix is refused here"
+	}
 	return []toon.Field{
 		{Key: "gate", Value: toon.NewObject(gfields...)},
 		{Key: "help", Value: []string{
 			"Run `no-mistakes axi respond --action approve` to accept this step and continue",
-			"Run `no-mistakes axi respond --action fix --findings <ids>` to have the pipeline fix the selected findings (do not edit files yourself)",
+			fixHelp,
 			"Run `no-mistakes axi respond --action skip` to skip this step",
 			fmt.Sprintf("Run `no-mistakes axi logs --step %s --full` to read the full step log", gate.Name),
 			"A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a `gate:`, respond; loop until an `outcome:`.",

@@ -38,6 +38,9 @@ type approvalResponse struct {
 	findingIDs    []string
 	instructions  map[string]string
 	addedFindings []types.Finding
+	// overrideFixCap authorizes this one fix round past an exhausted
+	// fix-round cap.
+	overrideFixCap bool
 }
 
 // Executor runs pipeline steps sequentially and coordinates approval interactions.
@@ -61,6 +64,11 @@ type Executor struct {
 	approvalCh  chan approvalResponse // buffered channel for approval responses
 	waiting     bool                  // true when blocked on approval
 	waitingStep types.StepName        // which step is currently awaiting approval
+	// waitingFixLimit and waitingFixRounds describe the fix-round budget of the
+	// gate currently published, so a fix response can be refused at the door
+	// with an accurate reason instead of silently funding another round.
+	waitingFixLimit  int
+	waitingFixRounds int
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
@@ -109,17 +117,43 @@ func (e *Executor) SetGateReconcileTimings(interval, timeout time.Duration) {
 	}
 }
 
+// RespondOptions carries the optional parts of an approval response.
+type RespondOptions struct {
+	// FindingIDs selects which of the gate's findings a fix action addresses.
+	FindingIDs []string
+	// Instructions holds per-finding user notes keyed by finding ID, and
+	// AddedFindings holds user-authored findings. Both are merged into the
+	// round's findings on a fix action before the fix agent runs.
+	Instructions  map[string]string
+	AddedFindings []types.Finding
+	// OverrideFixCap authorizes exactly one fix round past a step's exhausted
+	// fix-round cap. It is per response, never a lifted cap: the next round
+	// needs its own decision, which is the whole point of the ceiling.
+	OverrideFixCap bool
+}
+
 // Respond sends a user approval action to the currently waiting step.
 // The step parameter must match the step currently awaiting approval.
 // Returns an error if no step is awaiting approval or if the step name doesn't match.
 func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, findingIDs []string) error {
-	return e.RespondWithOverrides(step, action, findingIDs, nil, nil)
+	return e.RespondWithOptions(step, action, RespondOptions{FindingIDs: findingIDs})
 }
 
 // RespondWithOverrides is like Respond but also carries per-finding user
-// instructions and user-authored findings. Both are merged into the round's
-// findings on a fix action before the fix agent runs.
+// instructions and user-authored findings.
 func (e *Executor) RespondWithOverrides(step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, addedFindings []types.Finding) error {
+	return e.RespondWithOptions(step, action, RespondOptions{
+		FindingIDs:    findingIDs,
+		Instructions:  instructions,
+		AddedFindings: addedFindings,
+	})
+}
+
+// RespondWithOptions answers the published gate. A fix action is refused when
+// the step's fix-round cap is spent and the response carries no explicit
+// override; the refusal leaves the gate exactly as it was, so the caller can
+// still approve, skip, abort, or come back with the override.
+func (e *Executor) RespondWithOptions(step types.StepName, action types.ApprovalAction, opts RespondOptions) error {
 	e.mu.Lock()
 	if !e.waiting {
 		e.mu.Unlock()
@@ -129,16 +163,63 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		e.mu.Unlock()
 		return fmt.Errorf("step mismatch: responding to %q but %q is awaiting approval", step, e.waitingStep)
 	}
+	if action == types.ActionFix && !opts.OverrideFixCap && config.FixRoundCapReached(e.waitingFixLimit, e.waitingFixRounds) {
+		limit, rounds := e.waitingFixLimit, e.waitingFixRounds
+		e.mu.Unlock()
+		return fixCapRefusalError(step, limit, rounds)
+	}
 	e.waiting = false
 	e.mu.Unlock()
 
 	e.approvalCh <- approvalResponse{
-		action:        action,
-		findingIDs:    findingIDs,
-		instructions:  instructions,
-		addedFindings: addedFindings,
+		action:         action,
+		findingIDs:     opts.FindingIDs,
+		instructions:   opts.Instructions,
+		addedFindings:  opts.AddedFindings,
+		overrideFixCap: opts.OverrideFixCap,
 	}
 	return nil
+}
+
+// armApprovalGate publishes a gate for responses, carrying the fix-round budget
+// that decides whether a fix response can still be funded. roundsCompleted is
+// the step's round count so far, which is how the budget survives a daemon
+// restart: the rounds are durable, an in-memory counter is not.
+func (e *Executor) armApprovalGate(step types.StepName, fixLimit, roundsCompleted int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.waiting = true
+	e.waitingStep = step
+	e.waitingFixLimit = fixLimit
+	e.waitingFixRounds = roundsCompleted
+}
+
+func (e *Executor) disarmApprovalGate() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.waiting = false
+	e.waitingStep = ""
+	e.waitingFixLimit = 0
+	e.waitingFixRounds = 0
+}
+
+// fixCapConfigKey names the setting that owns a step's fix-round cap, so every
+// message points at the value the operator would actually edit.
+func fixCapConfigKey(step types.StepName) string {
+	return "auto_fix." + string(step)
+}
+
+// fixCapReason is the stated park reason: why this gate will not fund another
+// round, and how many findings are still open at it.
+func fixCapReason(step types.StepName, limit, openFindings int) string {
+	return fmt.Sprintf("%s cap %d reached; %d %s open",
+		fixCapConfigKey(step), limit, openFindings, pluralize(openFindings, "finding", "findings"))
+}
+
+func fixCapRefusalError(step types.StepName, limit, roundsCompleted int) error {
+	return fmt.Errorf("%s cap %d reached (%d fix %s already funded): approve, skip, or abort this gate, or re-fund exactly one more round with --override-fix-cap",
+		fixCapConfigKey(step), limit, config.FixRoundsUsed(roundsCompleted),
+		pluralize(config.FixRoundsUsed(roundsCompleted), "round", "rounds"))
 }
 
 // Execute runs the pipeline steps sequentially for a given run.
@@ -223,18 +304,21 @@ type stepExecutionState struct {
 	fixing           bool
 	previousFindings string
 	roundNum         int
-	autoFixAttempts  int
-	executionMS      int64
-	currentRoundID   string
+	// overrideFixCap marks the round this state starts as one funded past the
+	// step's spent fix-round cap by an explicit override.
+	overrideFixCap bool
+	executionMS    int64
+	currentRoundID string
 }
 
 type recoveredGate struct {
-	index           int
-	step            Step
-	stepResult      *db.StepResult
-	findings        string
+	index      int
+	step       Step
+	stepResult *db.StepResult
+	findings   string
+	// round is the last completed round, which is also the durable record of
+	// how much of the step's fix-round budget is already spent.
 	round           int
-	autoFixes       int
 	lastRoundID     string
 	reviewedHeadSHA string
 }
@@ -261,6 +345,10 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	gate, err := e.recoveredGate(run.ID)
 	if err != nil {
 		return err
+	}
+	recoveredFixLimit := 0
+	if e.config != nil {
+		recoveredFixLimit = e.config.AutoFixLimit(gate.step.Name())
 	}
 	logDir := e.paths.RunLogDir(run.ID)
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -326,10 +414,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		slog.Warn("could not reconcile recovered approval gate; preserving it", "run_id", run.ID, "step", gate.step.Name(), "error", reconcileErr)
 	}
 
-	e.mu.Lock()
-	e.waiting = true
-	e.waitingStep = gate.step.Name()
-	e.mu.Unlock()
+	e.armApprovalGate(gate.step.Name(), recoveredFixLimit, gate.round)
 	e.emitStepEventWithFindingsAndError(
 		ipc.EventStepCompleted,
 		run,
@@ -412,7 +497,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			fixing:           true,
 			previousFindings: merged,
 			roundNum:         gate.round,
-			autoFixAttempts:  gate.autoFixes,
+			overrideFixCap:   response.overrideFixCap && config.FixRoundCapReached(recoveredFixLimit, gate.round),
 			executionMS:      duration,
 			currentRoundID:   gate.lastRoundID,
 		})
@@ -454,19 +539,12 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 			if latest.FindingsJSON == nil || *latest.FindingsJSON != *result.FindingsJSON {
 				return nil, fmt.Errorf("recovered approval gate findings are incomplete")
 			}
-			autoFixes := 0
-			for _, round := range rounds {
-				if round.SelectionSource != nil && *round.SelectionSource == db.RoundSelectionSourceAutoFix {
-					autoFixes++
-				}
-			}
 			gate = &recoveredGate{
 				index:       index,
 				step:        e.steps[index],
 				stepResult:  result,
 				findings:    *result.FindingsJSON,
 				round:       latest.Round,
-				autoFixes:   autoFixes,
 				lastRoundID: latest.ID,
 			}
 			if latest.ReviewedHeadSHA != nil {
@@ -662,7 +740,6 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	}
 	// roundNum is shared with the perf wrapper's round closure below: an
 	// invocation during execution of round N+1 sees roundNum still at N.
-	autoFixAttempts := state.autoFixAttempts
 	roundNum := state.roundNum
 
 	stepAgent := e.agent
@@ -715,6 +792,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	nextTrigger := "initial"
 	if sctx.Fixing {
 		nextTrigger = "auto_fix"
+		if state.overrideFixCap {
+			nextTrigger = db.RoundTriggerFixCapOverride
+		}
 	}
 	skipRemaining := false
 	stepSkipped := false
@@ -722,6 +802,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	var reviewApprovedHeadSHA string
 
 	// Execute with possible fix loop
+rounds:
 	for {
 		outcome, err := step.Execute(sctx)
 		roundNum++
@@ -795,15 +876,19 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// Only auto-fix findings whose action is "auto-fix".
 		// This runs before the NeedsApproval check so that all severity
 		// levels (including "info") get a chance at automatic fixing.
-		if outcome.AutoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit {
+		//
+		// The budget is shared with every other funding source: rounds already
+		// paid for are counted from the step's own round history, so an
+		// agent-funded fix round leaves less automatic budget and vice versa.
+		if outcome.AutoFixable && autoFixLimit > 0 && !config.FixRoundCapReached(autoFixLimit, roundNum) {
 			fixableFindings := autoFixableFindingsJSON(outcome.Findings)
 			if fixableFindings != "" {
-				autoFixAttempts++
-				telemetry.Track("fix", e.fixTelemetryFields("auto", stepName, findingsCount(fixableFindings), autoFixAttempts))
-				slog.Info("auto-fixing step", "step", stepName, "attempt", autoFixAttempts, "max", autoFixLimit)
+				fixAttempt := config.FixRoundsUsed(roundNum) + 1
+				telemetry.Track("fix", e.fixTelemetryFields("auto", stepName, findingsCount(fixableFindings), fixAttempt))
+				slog.Info("auto-fixing step", "step", stepName, "attempt", fixAttempt, "max", autoFixLimit)
 				executionMS += time.Since(phaseStart).Milliseconds()
 				fixCount := findingsCount(fixableFindings)
-				writeLog(fmt.Sprintf("auto-fix round %d/%d starting after round %d (%d %s)", autoFixAttempts, autoFixLimit, roundNum, fixCount, pluralize(fixCount, "finding", "findings")))
+				writeLog(fmt.Sprintf("auto-fix round %d/%d starting after round %d (%d %s)", fixAttempt, autoFixLimit, roundNum, fixCount, pluralize(fixCount, "finding", "findings")))
 				if dbErr := e.db.UpdateStepStatus(sr.ID, types.StepStatusFixing); dbErr != nil {
 					slog.Warn("failed to update step status in db", "step", stepName, "status", "fixing", "error", dbErr)
 				}
@@ -819,7 +904,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				sctx.Fixing = true
 				sctx.PreviousFindings = fixableFindings
 				nextTrigger = "auto_fix"
-				continue
+				continue rounds
 			}
 		}
 
@@ -846,46 +931,64 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			approvalStatus = types.StepStatusFixReview
 		}
 
-		// Mark executor as ready to receive approval before updating DB or
-		// emitting events, so that callers who poll the DB status can
-		// immediately call Respond once they see it.
-		e.mu.Lock()
-		e.waiting = true
-		e.waitingStep = stepName
-		e.mu.Unlock()
+		var response approvalResponse
+		// The gate can be published more than once: a fix response that the
+		// step's spent fix-round cap refuses re-parks it unchanged rather than
+		// funding another round.
+	gate:
+		for {
+			// Mark executor as ready to receive approval before updating DB or
+			// emitting events, so that callers who poll the DB status can
+			// immediately call Respond once they see it.
+			e.armApprovalGate(stepName, autoFixLimit, roundNum)
 
-		// Parking starts before the gate becomes observable. This includes the
-		// small handoff from publishing the gate to receiving a response, and
-		// prevents a prompt response from being omitted from the parked total.
-		parkStart := time.Now()
+			// Parking starts before the gate becomes observable. This includes the
+			// small handoff from publishing the gate to receiving a response, and
+			// prevents a prompt response from being omitted from the parked total.
+			parkStart := time.Now()
 
-		// Surface the park as a pollable, run-level signal so a supervisor can
-		// tell in one `axi status` read that the run is waiting for the agent
-		// to drive this gate (versus actively running/fixing/ci). Observability
-		// only: it does not change the wait below. Cleared once the wait ends.
-		if dbErr := e.db.ParkStepForApproval(run.ID, sr.ID, approvalStatus, executionMS, findingsPtr); dbErr != nil {
-			e.mu.Lock()
-			e.waiting = false
-			e.waitingStep = ""
-			e.mu.Unlock()
-			return false, fmt.Errorf("persist %s approval gate: %w", stepName, dbErr)
-		}
-		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), outcome.Findings, "", &executionMS)
-
-		response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, true)
-		if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
-			slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
-		}
-		if err != nil {
-			if dbErr := e.db.FailStep(sr.ID, err.Error(), executionMS); dbErr != nil {
-				slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
+			// Surface the park as a pollable, run-level signal so a supervisor can
+			// tell in one `axi status` read that the run is waiting for the agent
+			// to drive this gate (versus actively running/fixing/ci). Observability
+			// only: it does not change the wait below. Cleared once the wait ends.
+			if dbErr := e.db.ParkStepForApproval(run.ID, sr.ID, approvalStatus, executionMS, findingsPtr); dbErr != nil {
+				e.disarmApprovalGate()
+				return false, fmt.Errorf("persist %s approval gate: %w", stepName, dbErr)
 			}
-			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", err.Error(), &executionMS)
-			return false, fmt.Errorf("step %s: waiting for approval: %w", stepName, err)
-		}
-		if reconciled {
-			phaseStart = time.Now()
-			goto done
+			// State the exhausted budget at the gate itself. Parking is the only
+			// place the driving agent looks, and an unexplained gate is exactly
+			// how a spent cap gets answered with another fix request.
+			if config.FixRoundCapReached(autoFixLimit, roundNum) {
+				writeLog(fixCapReason(stepName, autoFixLimit, findingsCount(outcome.Findings)) +
+					". No further fix rounds will be funded for this step: approve, skip, or abort this gate, or re-fund exactly one more round with --override-fix-cap.")
+			}
+			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), outcome.Findings, "", &executionMS)
+
+			var reconciled bool
+			var waitErr error
+			response, reconciled, waitErr = e.waitForApprovalOrReconcile(ctx, step, sctx, true)
+			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
+				slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
+			}
+			if waitErr != nil {
+				if dbErr := e.db.FailStep(sr.ID, waitErr.Error(), executionMS); dbErr != nil {
+					slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
+				}
+				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", waitErr.Error(), &executionMS)
+				return false, fmt.Errorf("step %s: waiting for approval: %w", stepName, waitErr)
+			}
+			if reconciled {
+				phaseStart = time.Now()
+				goto done
+			}
+			// Authoritative cap enforcement. RespondWithOptions refuses a capped
+			// fix at the door with a better message; this is the backstop that
+			// keeps the invariant true for any other response path.
+			if response.action == types.ActionFix && !response.overrideFixCap && config.FixRoundCapReached(autoFixLimit, roundNum) {
+				slog.Warn("refusing fix round past the fix-round cap", "step", stepName, "limit", autoFixLimit, "rounds", roundNum)
+				continue gate
+			}
+			break gate
 		}
 
 		approvalFields := telemetry.Fields{
@@ -936,6 +1039,13 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			phaseStart = time.Now()
 			selectedCount := selectedFindingCount(outcome.Findings, response.findingIDs)
 			writeLog(fmt.Sprintf("user-fix round starting after round %d (%d %s selected)", roundNum, selectedCount, pluralize(selectedCount, "finding", "findings")))
+			// Record the authorization in the run itself, not just the log: a
+			// round funded past the cap is the one an auditor needs to find.
+			overrideRound := response.overrideFixCap && config.FixRoundCapReached(autoFixLimit, roundNum)
+			if overrideRound {
+				slog.Info("funding fix round past the fix-round cap by explicit override", "step", stepName, "limit", autoFixLimit, "rounds", roundNum)
+				writeLog(fmt.Sprintf("--override-fix-cap: funding one round past the %s cap of %d", fixCapConfigKey(stepName), autoFixLimit))
+			}
 			if dbErr := e.db.UpdateStepStatus(sr.ID, types.StepStatusFixing); dbErr != nil {
 				slog.Warn("failed to update step status in db", "step", stepName, "status", "fixing", "error", dbErr)
 			}
@@ -944,6 +1054,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			mergedFindings := mergeUserOverridesJSON(selectedFindings, response.instructions, response.addedFindings)
 			sctx.PreviousFindings = mergedFindings
 			nextTrigger = "auto_fix"
+			if overrideRound {
+				nextTrigger = db.RoundTriggerFixCapOverride
+			}
 			if currentRoundID != "" {
 				allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, mergedFindings)
 				if idsJSON := marshalFindingIDs(allSelectedIDs); idsJSON != "" {
@@ -960,7 +1073,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			}
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFixing), "", "", nil)
 			slog.Info("step fix requested, re-executing", "step", stepName)
-			continue // loop back to step.Execute
+			continue rounds // loop back to step.Execute
 		}
 	}
 

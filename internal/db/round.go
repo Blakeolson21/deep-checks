@@ -7,6 +7,12 @@ const (
 	RoundSelectionSourceAutoFix = "auto_fix"
 )
 
+// RoundTriggerFixCapOverride marks a fix round that was funded past the step's
+// exhausted fix-round cap by an explicit --override-fix-cap decision. It is the
+// durable record of that authorization in the run itself: an ordinary
+// "auto_fix" trigger cannot be told apart from a round the budget paid for.
+const RoundTriggerFixCapOverride = "fix_cap_override"
+
 // StepRound represents one execution round within a pipeline step.
 type StepRound struct {
 	ID              string
@@ -55,8 +61,10 @@ type StepRoundStats struct {
 
 // IsFixRound reports whether this round was a fix attempt. Legacy "user_fix"
 // rounds count: they were fix rounds dispatched by an explicit user selection.
+// So do cap-override rounds: the authorization changes who paid for the round,
+// not what it was.
 func (r *StepRound) IsFixRound() bool {
-	return r.Trigger == "auto_fix" || r.Trigger == "user_fix"
+	return r.Trigger == "auto_fix" || r.Trigger == "user_fix" || r.Trigger == RoundTriggerFixCapOverride
 }
 
 // StepFixSummaries returns one entry per fix round for a step, in round order:

@@ -181,6 +181,13 @@ Run the pipeline and decide on its findings as they come up:
    self-fixed. (Other steps such as test and lint may auto-fix within the
    pipeline and re-run before they ever gate.)
 
+   **A configured ` + "`auto_fix.<step>`" + ` is a hard cap on the step's TOTAL fix
+   rounds in a run**, counting the rounds you fund with ` + "`--action fix`" + `, not
+   only the automatic ones. A gate whose cap is spent says so in a ` + "`fix_cap`" + `
+   line, and a plain ` + "`--action fix`" + ` there is refused. Read that as the
+   pipeline reporting that the review is laddering rather than converging:
+   decide the remaining findings instead of buying another round by reflex.
+
    Choose one response:
    ` + "```sh" + `
    # accept the step as-is and continue
@@ -211,6 +218,10 @@ Run the pipeline and decide on its findings as they come up:
       the gate's own ` + "`findings`" + ` table.
     - ` + "`--step <name>`" + ` responds to a specific step instead of the one currently
       awaiting approval. You rarely need this; omit it to answer the active gate.
+    - ` + "`--override-fix-cap`" + ` (with ` + "`--action fix`" + `) funds exactly one more
+      round past a spent ` + "`auto_fix.<step>`" + ` cap, and is recorded in the run.
+      Use it only when a specific finding is genuinely one round from done; the
+      round after it needs its own decision.
 3. Repeat step 2 until the output has an ` + "`outcome:`" + ` instead of a ` + "`gate:`" + `. The
    outcomes are:
    - ` + "`checks-passed`" + ` - the change is validated and CI is green (or the

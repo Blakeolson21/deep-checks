@@ -176,3 +176,30 @@ func TestAutoFixLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestFixRoundCap(t *testing.T) {
+	tests := []struct {
+		name            string
+		limit           int
+		roundsCompleted int
+		wantUsed        int
+		wantReached     bool
+	}{
+		{name: "no rounds yet", limit: 2, roundsCompleted: 0, wantUsed: 0},
+		{name: "initial round funds nothing", limit: 2, roundsCompleted: 1, wantUsed: 0},
+		{name: "one fix round funded", limit: 2, roundsCompleted: 2, wantUsed: 1},
+		{name: "budget exactly spent", limit: 2, roundsCompleted: 3, wantUsed: 2, wantReached: true},
+		{name: "past the budget", limit: 2, roundsCompleted: 9, wantUsed: 8, wantReached: true},
+		{name: "unset limit never caps", limit: 0, roundsCompleted: 12, wantUsed: 11},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := FixRoundsUsed(tt.roundsCompleted); got != tt.wantUsed {
+				t.Errorf("FixRoundsUsed(%d) = %d, want %d", tt.roundsCompleted, got, tt.wantUsed)
+			}
+			if got := FixRoundCapReached(tt.limit, tt.roundsCompleted); got != tt.wantReached {
+				t.Errorf("FixRoundCapReached(%d, %d) = %v, want %v", tt.limit, tt.roundsCompleted, got, tt.wantReached)
+			}
+		})
+	}
+}

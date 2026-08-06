@@ -35,6 +35,22 @@ When `commands.lint` is empty, that same invocation is a combined documentation-
 The lint step consumes a usable lint result from that pass instead of starting a second cold agent invocation; when the combined pass is skipped, cannot produce trustworthy structured output, or loses its in-memory result across a daemon restart, lint falls back to its own agent pass.
 Unresolved documentation findings and unresolved blocking lint findings pause for approval instead of entering another automatic fix loop.
 
+## The limit is a ceiling on the whole run, not just the automatic loop
+
+A configured limit bounds every fix round the step gets, not only the ones the daemon funds by itself. An agent answering a gate with `axi respond --action fix` spends the same budget.
+
+This exists because the loop is otherwise self-feeding. On a validation-heavy module, an adversarial review stops repeating findings and starts producing new ones every round: each round the fixer adds machinery to satisfy the last finding, and that machinery is new surface for the next one. Three measured runs configured `auto_fix.review: 2`, spent it on the automatic rounds, then laddered to nine, eleven, and twelve rounds because every later round was funded by hand.
+
+When the ceiling is reached and findings are still open, the step parks and says so instead of starting another round:
+
+```
+auto_fix.review cap 2 reached; 5 findings open
+```
+
+From there the decision is a human or agent one: approve the remaining findings, skip the step, abort the run, or judge that one more round is genuinely worth it and re-fund exactly one with [`axi respond --override-fix-cap`](/no-mistakes/reference/cli/#no-mistakes-axi-respond). An override is recorded in the run, and it does not lift the ceiling: the next round needs its own decision.
+
+A step whose limit is `0` has no automatic loop and no ceiling. `auto_fix.review` defaults to `0`, so a repository that has not opted into a review budget keeps unbounded agent-driven fix rounds, exactly as before.
+
 ## Before the agent: deterministic CI reruns
 
 The CI step has one cheaper option than a fix round, and it tries it first.

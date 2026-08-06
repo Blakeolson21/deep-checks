@@ -140,6 +140,11 @@ no-mistakes axi respond --action skip
 | `--instructions` | `string` | (none)        | Guidance applied to selected findings                                |
 | `--add-finding`  | `string` | (none)        | JSON finding object to add and fix                                   |
 | `-y`, `--yes`    | `bool`   | `false`       | Auto-fix up to 3 rounds per step; park unresolved findings           |
+| `--override-fix-cap` | `bool` | `false`   | Fund one more fix round past a spent [`auto_fix.<step>`](/no-mistakes/reference/global-config/#auto_fix) cap |
+
+A `--action fix` at a step whose configured fix-round cap is spent is refused, and the gate stays parked with its `fix_cap` reason.
+`--override-fix-cap` authorizes exactly one more round and is recorded in the run; the round after it needs its own decision.
+`--yes` never supplies the override: a gate whose cap is spent is handed back parked rather than fixed or approved.
 
 After the explicit response, `--yes` uses the same auto-resolution behavior as `axi run --yes`: fund up to 3 fix rounds per step for `auto-fix` and `ask-user` findings, approve clean gates and gates that only contain non-actionable `no-op` findings, and stop at `outcome: checks-passed` when the CI monitor reports readiness but the PR still needs a human merge. If actionable findings survive the budget, it leaves the run parked for explicit adjudication.
 Each `axi respond` blocks until the next gate, CI-ready decision point, or final outcome.

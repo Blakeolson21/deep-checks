@@ -12,6 +12,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
@@ -543,7 +544,13 @@ func gateResolution(gate stepView, fixRoundsUsed int) (action types.ApprovalActi
 	if err != nil || !types.HasActionableFindings(parsed) {
 		return types.ActionApprove, nil, true
 	}
-	if fixRoundsUsed >= maxYesFixRoundsPerStep {
+	// Two independent budgets stop the fixing here. The drive loop's own bound
+	// above, and the repository's configured auto_fix.<step> ceiling, which the
+	// daemon enforces by refusing the fix outright - requesting one anyway would
+	// fail the whole drive. Both mean the same thing: this step has had enough
+	// rounds, so hand the gate back parked rather than approve findings nothing
+	// adjudicated.
+	if fixRoundsUsed >= maxYesFixRoundsPerStep || config.FixRoundCapReached(gate.AutoFixLimit, gate.RoundCount) {
 		return "", nil, false
 	}
 	ids := make([]string, 0, len(parsed.Items))
@@ -602,13 +609,18 @@ func getRunInfo(client *ipc.Client, runID string) (*ipc.RunInfo, error) {
 
 // sendRespond issues an approval action to the daemon for a step.
 func sendRespond(client *ipc.Client, runID string, step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, added []types.Finding) error {
+	return sendRespondWithOverrideFixCap(client, runID, step, action, findingIDs, instructions, added, false)
+}
+
+func sendRespondWithOverrideFixCap(client *ipc.Client, runID string, step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, added []types.Finding, overrideFixCap bool) error {
 	params := &ipc.RespondParams{
-		RunID:         runID,
-		Step:          step,
-		Action:        action,
-		FindingIDs:    findingIDs,
-		Instructions:  instructions,
-		AddedFindings: added,
+		RunID:          runID,
+		Step:           step,
+		Action:         action,
+		FindingIDs:     findingIDs,
+		Instructions:   instructions,
+		AddedFindings:  added,
+		OverrideFixCap: overrideFixCap,
 	}
 	var result ipc.RespondResult
 	if err := client.Call(ipc.MethodRespond, params, &result); err != nil {
@@ -722,7 +734,7 @@ func successReportHelp(fixes []fixRow) []string {
 
 func newAxiRespondCmd() *cobra.Command {
 	var action, step, findings, instructions, addFinding string
-	var autoYes bool
+	var autoYes, overrideFixCap bool
 
 	cmd := &cobra.Command{
 		Use:   "respond",
@@ -742,12 +754,13 @@ func newAxiRespondCmd() *cobra.Command {
 				"auto_yes": autoYes,
 			}, func() error {
 				return runAxiRespond(cmd, respondArgs{
-					action:       action,
-					step:         step,
-					findings:     findings,
-					instructions: instructions,
-					addFinding:   addFinding,
-					autoYes:      autoYes,
+					action:         action,
+					step:           step,
+					findings:       findings,
+					instructions:   instructions,
+					addFinding:     addFinding,
+					autoYes:        autoYes,
+					overrideFixCap: overrideFixCap,
 				})
 			})
 		},
@@ -758,16 +771,18 @@ func newAxiRespondCmd() *cobra.Command {
 	cmd.Flags().StringVar(&instructions, "instructions", "", "guidance applied to the selected findings (with --action fix)")
 	cmd.Flags().StringVar(&addFinding, "add-finding", "", "JSON finding object to add and fix (with --action fix)")
 	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-fix up to 3 rounds per step; park unresolved findings")
+	cmd.Flags().BoolVar(&overrideFixCap, "override-fix-cap", false, "fund one more fix round past the step's exhausted auto_fix.<step> cap (recorded in the run)")
 	return cmd
 }
 
 type respondArgs struct {
-	action       string
-	step         string
-	findings     string
-	instructions string
-	addFinding   string
-	autoYes      bool
+	action         string
+	step           string
+	findings       string
+	instructions   string
+	addFinding     string
+	autoYes        bool
+	overrideFixCap bool
 }
 
 func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
@@ -845,7 +860,7 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 		}
 	}
 
-	if err := sendRespond(env.client, runID, stepName, act, findingIDs, instructions, added); err != nil {
+	if err := sendRespondWithOverrideFixCap(env.client, runID, stepName, act, findingIDs, instructions, added, ra.overrideFixCap); err != nil {
 		return emitError(cmd, 1, fmt.Sprintf("respond to %s: %v", stepName, err))
 	}
 

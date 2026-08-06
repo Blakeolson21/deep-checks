@@ -23,6 +23,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/logstore"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -792,7 +793,12 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		if err := mgr.HandleRespondWithOverrides(p.RunID, p.Step, p.Action, p.FindingIDs, p.Instructions, p.AddedFindings); err != nil {
+		if err := mgr.HandleRespondWithOptions(p.RunID, p.Step, p.Action, pipeline.RespondOptions{
+			FindingIDs:     p.FindingIDs,
+			Instructions:   p.Instructions,
+			AddedFindings:  p.AddedFindings,
+			OverrideFixCap: p.OverrideFixCap,
+		}); err != nil {
 			return nil, err
 		}
 		return &ipc.RespondResult{OK: true}, nil

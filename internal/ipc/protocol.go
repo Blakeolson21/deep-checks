@@ -149,6 +149,10 @@ type RespondParams struct {
 	FindingIDs    []string             `json:"finding_ids,omitempty"`
 	Instructions  map[string]string    `json:"instructions,omitempty"`
 	AddedFindings []types.Finding      `json:"added_findings,omitempty"`
+	// OverrideFixCap authorizes one fix round past a step whose configured
+	// fix-round cap (auto_fix.<step>) is spent. Without it the daemon refuses
+	// the fix and leaves the gate parked for a decision.
+	OverrideFixCap bool `json:"override_fix_cap,omitempty"`
 }
 
 // CancelRunParams cancels an active pipeline run.

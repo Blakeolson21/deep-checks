@@ -1542,7 +1542,31 @@ func applyAutoFixOverrides(dst *AutoFix, src *AutoFixRaw) {
 	}
 }
 
-// AutoFixLimit returns the max auto-fix attempts for a given step.
+// FixRoundsUsed converts a step's completed round count into the number of fix
+// rounds something has already paid for. Round 1 is the step's initial
+// execution; every later round exists only because a funding source (auto-fix,
+// an agent's `respond --action fix`, or an explicit cap override) asked for it.
+func FixRoundsUsed(roundsCompleted int) int {
+	if roundsCompleted < 1 {
+		return 0
+	}
+	return roundsCompleted - 1
+}
+
+// FixRoundCapReached reports whether a step has spent its whole fix-round
+// budget. A configured positive auto_fix.<step> value is a HARD per-run ceiling
+// on total fix rounds from every funding source, not just the automatic ones:
+// three real runs configured auto_fix.review: 2, spent it on rounds 2 and 3,
+// then laddered to 9-12 rounds because agent-funded rounds were unbounded.
+// A limit of 0 (the default for review) means auto-fix is off and no ceiling is
+// configured, which deliberately leaves agent-driven fix rounds unbounded as
+// before - opting into a budget is what opts into the ceiling.
+func FixRoundCapReached(limit, roundsCompleted int) bool {
+	return limit > 0 && FixRoundsUsed(roundsCompleted) >= limit
+}
+
+// AutoFixLimit returns the max auto-fix attempts for a given step, which is
+// also the step's hard per-run fix-round cap (see FixRoundCapReached).
 // Steps without auto-fix support return 0.
 func (c *Config) AutoFixLimit(step types.StepName) int {
 	switch step {

@@ -445,6 +445,49 @@ func TestGateResolution(t *testing.T) {
 			wantResolved:  false,
 		},
 		{
+			// The daemon refuses a fix past the configured cap, so requesting
+			// one here would fail the whole drive.
+			name: "gate whose configured fix-round cap is spent is handed back, not fixed",
+			gate: stepView{
+				Name:         "review",
+				Status:       string(types.StepStatusFixReview),
+				FindingsJSON: `{"findings":[{"id":"review-1","severity":"error","description":"bug","action":"auto-fix"}],"summary":"1"}`,
+				AutoFixLimit: 2,
+				RoundCount:   3,
+			},
+			fixRoundsUsed: 2,
+			wantResolved:  false,
+		},
+		{
+			name: "gate with configured fix-round budget left is still fixed",
+			gate: stepView{
+				Name:         "review",
+				Status:       string(types.StepStatusFixReview),
+				FindingsJSON: `{"findings":[{"id":"review-1","severity":"error","description":"bug","action":"auto-fix"}],"summary":"1"}`,
+				AutoFixLimit: 2,
+				RoundCount:   2,
+			},
+			fixRoundsUsed: 1,
+			wantAction:    types.ActionFix,
+			wantIDs:       []string{"review-1"},
+			wantResolved:  true,
+		},
+		{
+			// A cleared gate is still approvable after the cap: the ceiling
+			// stops fixing, it does not strand a step with nothing to decide.
+			name: "cleared gate is approved even with the configured cap spent",
+			gate: stepView{
+				Name:         "review",
+				Status:       string(types.StepStatusFixReview),
+				FindingsJSON: `{"findings":[],"summary":"clean"}`,
+				AutoFixLimit: 2,
+				RoundCount:   3,
+			},
+			fixRoundsUsed: 2,
+			wantAction:    types.ActionApprove,
+			wantResolved:  true,
+		},
+		{
 			name: "actionable findings without ids are handed back rather than fixing nothing or approving them away",
 			gate: stepView{
 				Name:         "review",

@@ -304,6 +304,9 @@ Set `false` to force every agent invocation cold.
 ### auto_fix
 
 Maximum follow-up auto-fix attempts per step. Set a step to `0` to disable the follow-up auto-fix loop, so findings require manual approval.
+
+A positive value is also a **hard per-run ceiling on that step's total fix rounds**, counting every funding source: the automatic loop, an agent's `axi respond --action fix`, and `--yes`. Once the ceiling is reached, the step will not start another fix round; a gate that still has findings stays parked and states the reason (`auto_fix.review cap 2 reached; 5 findings open`), and a fix response is refused until someone re-funds exactly one round with [`axi respond --override-fix-cap`](/no-mistakes/reference/cli/#no-mistakes-axi-respond), which is recorded in the run.
+A step left at `0` has no automatic loop and no ceiling, so agent-driven fix rounds there stay unbounded: opting into a budget is what opts into the ceiling.
 The document step attempts documentation fixes during its initial pass, so unresolved documentation findings pause for approval instead of using an automatic follow-up loop.
 For empty `commands.lint`, the document step's combined housekeeping pass also attempts safe lint fixes, and the lint step consumes its result; unresolved blocking lint findings then pause for approval instead of starting another automatic fix loop.
 

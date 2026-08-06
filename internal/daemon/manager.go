@@ -1069,6 +1069,16 @@ func (m *RunManager) HandleRespond(runID string, step types.StepName, action typ
 // HandleRespondWithOverrides is like HandleRespond but also forwards user
 // instructions and user-authored findings to the executor.
 func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, addedFindings []types.Finding) error {
+	return m.HandleRespondWithOptions(runID, step, action, pipeline.RespondOptions{
+		FindingIDs:    findingIDs,
+		Instructions:  instructions,
+		AddedFindings: addedFindings,
+	})
+}
+
+// HandleRespondWithOptions forwards a complete approval response, including an
+// explicit authorization to fund one fix round past a spent fix-round cap.
+func (m *RunManager) HandleRespondWithOptions(runID string, step types.StepName, action types.ApprovalAction, opts pipeline.RespondOptions) error {
 	m.mu.Lock()
 	exec, ok := m.executors[runID]
 	m.mu.Unlock()
@@ -1077,7 +1087,7 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 		return fmt.Errorf("no active executor for run %s", runID)
 	}
 
-	return exec.RespondWithOverrides(step, action, findingIDs, instructions, addedFindings)
+	return exec.RespondWithOptions(step, action, opts)
 }
 
 // Shutdown cancels all active runs. Called during daemon shutdown to prevent
