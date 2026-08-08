@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -754,6 +755,51 @@ func TestExtractCommitSummary_RejectsOversizedSummary(t *testing.T) {
 	}
 	if _, err := extractCommitSummary(&agent.Result{Output: output}); err == nil {
 		t.Fatal("extractCommitSummary() accepted an oversized summary")
+	}
+}
+
+func TestExtractCommitSummary_BoundsNormalizedSummary(t *testing.T) {
+	t.Parallel()
+
+	footer := " ✅ closeable"
+	tests := []struct {
+		name    string
+		summary string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:    "footer alone exceeds byte limit",
+			summary: strings.Repeat("x", 4084) + footer,
+			want:    strings.Repeat("x", 4084),
+		},
+		{
+			name:    "durable prefix exceeds byte limit",
+			summary: strings.Repeat("é", config.MaxFixMessageSummaryBytes/2+1) + footer,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output, err := json.Marshal(map[string]string{"summary": tt.summary})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := extractCommitSummary(&agent.Result{Output: output})
+			if tt.wantErr {
+				if !errors.Is(err, errRejectedCommitSummary) {
+					t.Fatalf("extractCommitSummary() error = %v, want %v", err, errRejectedCommitSummary)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("extractCommitSummary() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("extractCommitSummary() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

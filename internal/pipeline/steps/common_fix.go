@@ -193,12 +193,12 @@ func extractCommitSummary(result *agent.Result) (string, error) {
 	if err := json.Unmarshal(result.Output, &summary); err != nil {
 		return "", fmt.Errorf("parse commit summary: %w", err)
 	}
-	if len(summary.Summary) > config.MaxFixMessageSummaryBytes {
-		return "", fmt.Errorf("%w: commit summary must not exceed %d bytes", errRejectedCommitSummary, config.MaxFixMessageSummaryBytes)
-	}
 	cleaned := strings.Join(strings.Fields(summary.Summary), " ")
 	cleaned = stripThreadStatusFooter(cleaned)
 	cleaned = strings.Trim(cleaned, " \t\r\n\"'.;:,-")
+	if len(cleaned) > config.MaxFixMessageSummaryBytes {
+		return "", fmt.Errorf("%w: commit summary must not exceed %d bytes", errRejectedCommitSummary, config.MaxFixMessageSummaryBytes)
+	}
 	return cleaned, nil
 }
 
