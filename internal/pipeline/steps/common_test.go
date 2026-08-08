@@ -757,6 +757,108 @@ func TestExtractCommitSummary_RejectsOversizedSummary(t *testing.T) {
 	}
 }
 
+func TestExtractCommitSummary_StripsThreadStatusFooter(t *testing.T) {
+	t.Parallel()
+
+	// These summaries are drawn from real fix-agent output on a repository
+	// whose instruction file asks for a status footer on every turn-ending
+	// message. Each one reached a commit subject unchanged.
+	tests := []struct {
+		name    string
+		summary string
+		want    string
+	}{
+		{
+			name:    "closeable",
+			summary: "Isolate test cleanup and correct ADR link ✅ closeable",
+			want:    "Isolate test cleanup and correct ADR link",
+		},
+		{
+			name:    "closeable on a later commit",
+			summary: "Protect pairing codes during capability probes ✅ closeable",
+			want:    "Protect pairing codes during capability probes",
+		},
+		{
+			name:    "closeable after",
+			summary: "Harden H3 gate and legal policy enforcement ⏳ closeable after: CI",
+			want:    "Harden H3 gate and legal policy enforcement",
+		},
+		{
+			name:    "waiting",
+			summary: "Reject duplicate target names before issuance \U0001f64b waiting: owner ruling",
+			want:    "Reject duplicate target names before issuance",
+		},
+		{
+			name:    "footer carrying a ship state",
+			summary: "Handle undecodable H3 licence inputs fail-closed ✅ closeable · pushed to main",
+			want:    "Handle undecodable H3 licence inputs fail-closed",
+		},
+		{
+			name:    "footer with no separating space",
+			summary: "Correct app count and external-service claims✅ closeable",
+			want:    "Correct app count and external-service claims",
+		},
+		{
+			name:    "summary that is only a footer",
+			summary: "✅ closeable",
+			want:    "",
+		},
+		{
+			name:    "clean summary is untouched",
+			summary: "Fix H3 CLI entry points and behavioral tests",
+			want:    "Fix H3 CLI entry points and behavioral tests",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			output, err := json.Marshal(map[string]string{"summary": tt.summary})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := extractCommitSummary(&agent.Result{Output: output})
+			if err != nil {
+				t.Fatalf("extractCommitSummary() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("extractCommitSummary() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// A rendered subject must never carry a thread-status glyph, whatever the agent
+// returned. This asserts the property end to end so the guarantee does not rest
+// on extractCommitSummary's internals alone.
+func TestRenderFixMessage_NeverCarriesAThreadStatusGlyph(t *testing.T) {
+	t.Parallel()
+
+	output, err := json.Marshal(map[string]string{
+		"summary": "Correct capability catalog and source-backed claims ✅ closeable",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, err := extractCommitSummary(&agent.Result{Output: output})
+	if err != nil {
+		t.Fatal(err)
+	}
+	subject, err := (config.Commit{}).RenderFixMessage(types.StepReview, summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, glyph := range []string{"✅", "⏳", "\U0001f64b"} {
+		if strings.Contains(subject, glyph) {
+			t.Fatalf("rendered subject %q contains thread-status glyph %q", subject, glyph)
+		}
+	}
+	if want := "no-mistakes(review): Correct capability catalog and source-backed claims"; subject != want {
+		t.Fatalf("rendered subject = %q, want %q", subject, want)
+	}
+}
+
 func TestExecuteFixMode_RejectsUnsafeSummaryWithoutStaging(t *testing.T) {
 	t.Parallel()
 

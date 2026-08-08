@@ -197,8 +197,44 @@ func extractCommitSummary(result *agent.Result) (string, error) {
 		return "", fmt.Errorf("%w: commit summary must not exceed %d bytes", errRejectedCommitSummary, config.MaxFixMessageSummaryBytes)
 	}
 	cleaned := strings.Join(strings.Fields(summary.Summary), " ")
+	cleaned = stripThreadStatusFooter(cleaned)
 	cleaned = strings.Trim(cleaned, " \t\r\n\"'.;:,-")
 	return cleaned, nil
+}
+
+// isThreadStatusGlyph reports whether r opens a chat status-footer line, such
+// as "✅ done", "⏳ blocked on: <x>", or "🙋 waiting: <x>". Status footers are a
+// common convention in user instruction files (AGENTS.md, CLAUDE.md), which
+// direct an agent to close every turn-ending message with one.
+func isThreadStatusGlyph(r rune) bool {
+	switch r {
+	case '✅', // white heavy check mark
+		'⏳',          // hourglass with flowing sand
+		'\U0001f64b': // happy person raising one hand
+		return true
+	}
+	return false
+}
+
+// stripThreadStatusFooter removes a trailing chat status footer from an
+// agent-authored commit summary.
+//
+// The fix agent reads the user's instruction files, so a repository that asks
+// for a status footer on every turn-ending message gets one appended to the
+// structured summary too: the agent treats finishing its fix as ending a turn.
+// That summary becomes the commit subject, so the footer lands in permanent
+// history as "no-mistakes(review): Harden the parser ✅ done". The footer
+// addresses a human reading a chat thread and carries no meaning in a subject
+// line, so truncating at the glyph keeps what the agent actually described.
+//
+// Normalizing rather than rejecting is deliberate: the round's code changes are
+// already applied and valid, and failing over a cosmetic suffix would discard
+// real work.
+func stripThreadStatusFooter(summary string) string {
+	if idx := strings.IndexFunc(summary, isThreadStatusGlyph); idx >= 0 {
+		return summary[:idx]
+	}
+	return summary
 }
 
 // executeFixMode runs the fix agent and commits any resulting changes. It
