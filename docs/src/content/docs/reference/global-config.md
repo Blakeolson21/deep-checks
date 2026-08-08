@@ -360,6 +360,7 @@ The template supports literal text and two Go-style placeholders:
 | `{{.Step}}` | Pipeline step name, such as `review`, `test`, `document`, or `lint` |
 | `{{.Summary}}` | Sanitized one-line summary returned by the fix agent, or the step's deterministic fallback summary |
 
+No-mistakes removes thread-status text beginning with the literal `✅`, `⏳`, or `🙋` glyph from the agent summary before applying the summary limit; if normalization leaves no summary, the step uses its deterministic fallback.
 The value must be a valid UTF-8 template that renders to a non-empty, single-line commit subject.
 The template source is limited to 1,024 bytes and 16 placeholders.
 The fix-agent summary and final rendered subject are each limited to 4,096 bytes.

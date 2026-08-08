@@ -905,6 +905,54 @@ func TestRenderFixMessage_NeverCarriesAThreadStatusGlyph(t *testing.T) {
 	}
 }
 
+func TestExecuteFixMode_StripsThreadStatusFooterFromCommittedSubject(t *testing.T) {
+	t.Parallel()
+
+	for _, stepName := range []types.StepName{types.StepReview, types.StepTest, types.StepLint} {
+		stepName := stepName
+		t.Run(string(stepName), func(t *testing.T) {
+			t.Parallel()
+
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			gitCmd(t, dir, "checkout", "--detach", headSHA)
+			output, err := json.Marshal(map[string]string{
+				"summary": "Correct capability catalog and source-backed claims ✅ closeable",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ag := &mockAgent{
+				name: "test",
+				runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+					if err := os.WriteFile(filepath.Join(opts.CWD, "agent-change.txt"), []byte("change"), 0o644); err != nil {
+						return nil, err
+					}
+					return &agent.Result{Output: output}, nil
+				},
+			}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Fixing = true
+
+			summary, err := executeFixMode(sctx, stepName, fixExecutionOptions{
+				ErrorPrefix:     "agent fix",
+				FallbackSummary: "apply fixes",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := "Correct capability catalog and source-backed claims"; summary != want {
+				t.Fatalf("fix summary = %q, want %q", summary, want)
+			}
+			wantSubject := fmt.Sprintf("no-mistakes(%s): Correct capability catalog and source-backed claims", stepName)
+			got := lastCommitMessage(t, dir)
+			t.Logf("git log -1 --pretty=%%s: %s", got)
+			if got != wantSubject {
+				t.Fatalf("git commit subject = %q, want %q", got, wantSubject)
+			}
+		})
+	}
+}
+
 func TestExecuteFixMode_RejectsUnsafeSummaryWithoutStaging(t *testing.T) {
 	t.Parallel()
 
